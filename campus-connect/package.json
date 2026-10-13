@@ -1,0 +1,19 @@
+{
+  "name": "campus-connect",
+  "version": "1.0.0",
+  "description": "College Event Management System - Advanced DBMS project (Node.js + Express + MongoDB)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "seed": "node scripts/seed.js",
+    "test": "node tests/integration.js"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongoose": "^8.5.1",
+    "qrcode": "^1.5.4"
+  }
+}

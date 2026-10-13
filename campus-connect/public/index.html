@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Campus Beats – College Event Management</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <noscript>Campus Beats needs JavaScript enabled.</noscript>
+  <div id="auth" class="auth" hidden></div>
+  <div id="shell" class="shell" hidden>
+    <aside id="sidebar" class="sidebar" aria-label="Main navigation">
+      <div class="brand"><span class="logo" aria-hidden="true"></span>Campus Beats</div>
+      <nav id="nav"></nav>
+    </aside>
+    <div class="content">
+      <header class="topbar">
+        <button id="menuBtn" class="icon-btn menu-btn" aria-label="Open navigation" aria-expanded="false">☰</button>
+        <h1 id="viewTitle">Campus Beats</h1>
+        <div class="who">
+          <button id="bellBtn" class="icon-btn" aria-label="Notifications">🔔<span id="bellCount" class="count" hidden>0</span></button>
+          <div class="who-text"><strong id="whoName"></strong><span id="whoRole" class="role-pill"></span></div>
+          <button id="logoutBtn" class="btn ghost small">Log out</button>
+        </div>
+      </header>
+      <main id="view" tabindex="-1"></main>
+    </div>
+  </div>
+  <div id="modalRoot"></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

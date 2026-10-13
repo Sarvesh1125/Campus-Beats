@@ -10,10 +10,8 @@ if not exist .env (
   copy .env.example .env >nul
   echo Created .env from .env.example
 )
-call npm install --omit=dev
+call npm install
 if errorlevel 1 ( echo npm install failed. & pause & exit /b 1 )
-call npm run migrate
-if errorlevel 1 ( echo Migration failed. See README. & pause & exit /b 1 )
 call npm run seed
 if errorlevel 1 (
   echo Seeding failed. Is the MongoDB service running? See README - Troubleshooting.

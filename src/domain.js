@@ -44,8 +44,9 @@ function validateRegistration(b) {
   if (password.length < 8) errors.push('Password must contain at least 8 characters');
   if (password.length > 200) errors.push('Password is too long');
   if (!['student', 'organizer'].includes(role)) errors.push('Role must be Student or Organizer');
+  if (role === 'organizer' && organizationNumber.length < 3) errors.push('Organization registration number is required for organizers');
   if (errors.length) fail(errors);
-  return { name, email, phone, password, role, interests: parseInterests(b.interests) };
+  return { name, email, phone, password, role, organizationNumber: role === 'organizer' ? organizationNumber : '', interests: parseInterests(b.interests) };
 }
 
 function validateEvent(b, venue, now = new Date()) {
@@ -72,7 +73,7 @@ function validateEvent(b, venue, now = new Date()) {
   if (!Number.isFinite(budget) || budget < 0) errors.push('Budget cannot be negative');
   else if (budget > BUDGET_THRESHOLD && budgetNotes.length < 10) errors.push(`Budget breakdown is required for budgets above ₹${BUDGET_THRESHOLD.toLocaleString('en-IN')}`);
   if (errors.length) fail(errors);
-  return { title, titleKey: title.toLowerCase(), description, category, start, end, capacity, budget, budgetNotes, dateKey: new Date(start.getTime() + 19800000).toISOString().slice(0, 10) };
+  return { title, titleKey: title.toLowerCase(), description, category, start, end, capacity, budget, budgetNotes, dateKey: start.toISOString().slice(0, 10) };
 }
 
 const activeReg = (ev, studentId) => ev.registrations.find((r) => String(r.student) === String(studentId) && r.status !== 'cancelled');

@@ -1,165 +1,85 @@
-# Campus Connect 2.0 — local Advanced DBMS project
+# Campus Connect – College Event Management System
 
-A working HTML/CSS/JavaScript website with Express, Mongoose, local MongoDB, and server-side sessions. No hosting or cloud database is required. MongoDB Compass inspects the same data the website stores; Compass itself is not the database server.
+Advanced DBMS project: a web application built with HTML/CSS/JS, Node.js/Express, Mongoose, and MongoDB. It can run locally with MongoDB Community Server and MongoDB Compass, or deploy on Render with MongoDB Atlas.
 
-## Start on Windows
+Local development defaults to `http://localhost:3000` and `mongodb://127.0.0.1:27017/campus_connect`. For hosting, configure `MONGODB_URI`, `NODE_ENV=production`, and the other required environment variables in the hosting dashboard; never commit `.env` or paste database credentials into source code.
 
-1. Install **Node.js 22 or newer**, MongoDB Community Server, and MongoDB Compass. During MongoDB setup, install MongoDB as a Windows service.
-2. Extract this project to a normal folder, for example `C:\Projects\campus-connect`. Open that folder in VS Code.
-3. Stop your previous Campus Connect server with Ctrl+C. Keep the existing database and `.env` settings if you have them.
-4. Open Command Prompt in the project folder. On a first setup, run:
+## Quick start (Windows)
 
-```bat
-copy .env.example .env
-npm install --omit=dev
-npm run migrate
-npm run seed
-npm start
-```
+1. **Install Node.js** (LTS 18 or newer) from <https://nodejs.org>. Check: open PowerShell → `node -v`.
+2. **Install MongoDB Community Server** from <https://www.mongodb.com/try/download/community>. Choose *Complete*, tick **"Install MongoDB as a Service"** (Run as Network Service).
+3. **Install MongoDB Compass** (offered by the installer, or <https://www.mongodb.com/try/download/compass>).
+4. **Start the MongoDB service**: press `Win+R` → `services.msc` → find **MongoDB Server** → *Start*. Or in an **Administrator** PowerShell: `net start MongoDB`.
+5. **Open the project folder in VS Code** (`File → Open Folder → campus-connect`), then `Terminal → New Terminal`.
+6. **Copy the env file**: `copy .env.example .env`
+7. **Install packages**: `npm install`
+8. **Load demo data** (safe to re-run, never deletes anything): `npm run seed`
+9. **Start the server**: `npm start`
+10. **Open** <http://localhost:3000>
 
-**Existing project:** preserve your old `.env`; do not overwrite it. Add the new settings shown below. Run installation and migration with the old server stopped. Seeding is optional and only adds missing demo records.
+Shortcuts: double-click `setup-and-start.bat` the first time, `start-local.bat` afterwards.
 
-Open **http://localhost:3000**. For subsequent starts, run `npm start` or double-click `start-local.bat`. First-time users can double-click `setup-and-start.bat`, which installs packages, migrates, adds missing demo data, and starts the app.
-
-`npm install --omit=dev` avoids downloading test-only dependencies. Internet is needed to install npm packages; the running website and QR library assets are served locally.
-
-### Environment settings
-
-```dotenv
-MONGODB_URI=mongodb://127.0.0.1:27017/campus_connect
-HOST=127.0.0.1
-PORT=3000
-APP_BASE_URL=http://localhost:3000
-NODE_ENV=development
-PASSWORD_DELIVERY=console
-```
-
-Keep credentials in `.env`, which must not be committed. This ZIP excludes the uploaded `.env` and `node_modules`. Your database is stored by MongoDB separately from this source folder.
-
-### Demo accounts
-
-Password: `Campus@123`
-
+### Demo accounts (password `Campus@123`)
 | Role | Email |
 |---|---|
 | Admin | admin@campus.local |
-| Organizer | organizer@campus.local |
+| Organizer (verified) | organizer@campus.local |
 | Student | student@campus.local |
-| Second Student | student2@campus.local |
+| Student 2 | student2@campus.local |
 
-Existing accounts are not overwritten by the seed script, so their current passwords may differ. Public registration never grants Admin. Use **Admin → Users → Create user** for additional Admins.
+Other commands: `npm run dev` (auto-restart), `npm test` (integration tests – uses the separate `campus_connect_test` database).
 
 ## Connect MongoDB Compass
+1. Open Compass → **Add new connection**.
+2. URI: `mongodb://127.0.0.1:27017` → **Connect**.
+3. In the left tree click **campus_connect** (it appears after `npm run seed` or `npm start`; click the refresh icon if not).
+4. Click a collection name to browse documents. Use **Filter**, **Indexes** and **Aggregations** tabs.
 
-1. Open Compass and choose **Add new connection** (or New Connection).
-2. Enter `mongodb://127.0.0.1:27017` and connect.
-3. Open `campus_connect` after migration/seeding or the first saved record.
-4. Browse `users`, `venues`, `events`, `feedbacks`, `notifications`, `sessions`, `suggestions`, `counters`, `audit_logs`, and `write_locks`.
-5. In `events`, use Filter `{ "status": "Approved" }`. Expand `registrations` to see saved student IDs, ticket codes, status, and check-in times.
-6. Refresh the collection after taking an action on the website.
+## Event lifecycle safeguards
 
-Do not manually change venue reservations, roles, or registration arrays while the server is running; the application enforces rules around those writes.
+- An event is shown as **Ongoing** while its start/end times indicate that it is in progress.
+- Once an event has started, its details/dates cannot be edited, it cannot be cancelled or deleted, and student registrations cannot be cancelled.
+- Organizer accounts cannot be deactivated or unverified while they own an ongoing event. Students with an active registration in an ongoing event cannot be deactivated either.
+- Students cannot register for an event that has started or completed.
+- An event can be permanently deleted only before it starts and only if it has no registration or feedback history. Events with history should be cancelled/archived so reporting records remain intact.
+- These rules are enforced by the server API, not just by the browser UI.
 
-## What's new
+## Collections
+| Collection | Purpose |
+|---|---|
+| `users` | Accounts: hashed password, role (admin/organizer/student), `verified`, `active` |
+| `venues` | Venues with capacity and amenities; `active:false` = archived |
+| `events` | Events **with embedded `registrations[]`** (student ref, status, ticketCode, registeredAt, checkedInAt) |
+| `feedbacks` | One rating/comment per student per event |
+| `notifications` | Per-user messages, `read` flag |
+| `suggestions` | Platform suggestions/bugs with status |
+| `sessions` | Login sessions (SHA-256 token hash, TTL-expiring) |
 
-- Admin can deactivate or revoke an Organizer during a live event. Accounts and event records are preserved. Deactivation ends sessions; verification revocation blocks Organizer operations but keeps profile and notifications accessible.
-- Event reassignment preserves `originalCreator`. Admin can continue check-in while an event needs reassignment.
-- Check-in page includes camera preview, camera choice, QR image upload, manual entry, and live attendance counts. Admin also has a Scan QR entry.
-- Forgot/reset password with single-use 15-minute links; existing sessions expire on reset.
-- System-generated Organizer numbers; concurrent creation is safe.
-- Admin user creation, role assignment, activation, Organizer verification, and password setup.
-- First approval announces an event to active Students, with persistent deduplication and retry.
-- Venue availability plus daily reservation view; both pending and approved events reserve time.
-- Month/week/agenda calendars, scoped per role. Scheduling inputs and calendars use Asia/Kolkata (IST).
-- Updated responsive purple/white design, notifications, audit log, pagination, search, filters, cloning, and health view.
+Details: [docs/DATABASE.md](docs/DATABASE.md) · API: [docs/API.md](docs/API.md) · Presentation script: [docs/DEMO.md](docs/DEMO.md)
 
-## Password recovery and new account setup
+## Demonstrations
 
-Default **console mode** is a local demonstration feature:
+**CRUD** – In the app: create a venue (Admin → Venues), edit it, archive it; create/edit/cancel an event (Organizer). After each action press refresh in Compass on `venues` / `events` and show the document change (`updatedAt`, `status`). Compass can also edit/delete a document directly (pencil/trash icons).
 
-1. Choose Forgot password and enter the account email.
-2. Look in the terminal running `npm start` for `[LOCAL PASSWORD SETUP]`.
-3. Open that link within 15 minutes and choose a password.
-4. Log in again. A new link invalidates the old one; a used link cannot be reused.
+**Registration & waitlist** – Use *One-seat Waitlist Demo*. Student 1 registers (status `registered`), Student 2 registers (status `waitlisted`). In Compass open `events`, filter `{ title: "One-seat Waitlist Demo" }` and expand `registrations`. Student 1 cancels → Student 2 becomes `registered` automatically and both get notifications.
 
-The public endpoint does not return tokens or expose whether an account exists. The raw link is printed only in development console mode. Never share terminal reset links. Account deactivation is not undone by resetting its password.
+**QR check-in** – Student 1 registers for *Live Check-in Practice* (or use the pre-issued ticket `TKT-DEMO0001` for student@campus.local) and opens **My events → View QR ticket**. Organizer → **Check-in**, pick the event, type/scan the ticket code. In Compass the registration shows `status: "checked-in"` and `checkedInAt`. A second attempt is rejected. (Check-in is open only from 1 h before start until the end.)
 
-For actual email, set `PASSWORD_DELIVERY=smtp`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM` in `.env`. Use credentials supported by your email provider. SMTP delivery needs a reachable mail server and has not been verified against your provider. Console mode requires no email account. New Admin-created users receive their first password setup through the same delivery method.
-
-## QR scanning
-
-Open **Organizer → Check-in** or **Admin → Scan QR**, select the event, then Start Camera. Grant browser permission. Start Camera is the only action that requests camera access. Stop Camera and leaving the page release it. Scans are validated by the backend; the QR content is only an opaque ticket code.
-
-If the camera is blocked, use **Upload QR image** or type the ticket code. On a fresh seed, `TKT-DEMO0001` belongs to Live Check-in Practice and its check-in window opens immediately. The seed does not reset an old event; if its time has passed, create a new event starting within the next hour, approve it, and register a Student.
-
-Camera access works on localhost in supported browsers. A phone opening `http://<laptop-IP>:3000` may not have camera access because that address is not a secure context. This project defaults to loopback access; it does not configure HTTPS or LAN exposure. Test with your laptop camera, or use image/manual input. Physical camera scanning needs a manual test on your device.
-
-## Venue concurrency and crash recovery
-
-This local prototype supports standalone MongoDB; **no replica set is required**. Each API mutation acquires one shared `write_locks` document using MongoDB's unique `_id`. Writes across server processes are serialized before checking overlap or the last active Admin. Waiting requests re-read permissions. Registration and check-in also use conditional single-document updates.
-
-The lock intentionally has **no automatic expiry**: a paused or stale writer cannot continue after another process takes over. A normal request releases the lock in `finally`. A server crash during a write may leave the lock, causing later writes to return 503 after a short wait. To recover:
-
-1. Stop **all** Node servers using this database.
-2. Inspect the last operation, affected records and audit entries in Compass; multi-document operations do not have transactional rollback.
-3. Run:
-
-```bat
-npm run recover-lock -- --confirm-server-stopped
-```
-
-4. Start the server again. Do not clear a lock while any writer is still running.
-
-This trades write throughput for simplicity and safe overlap checks in a local academic prototype. It is not a distributed transaction system. Compass edits or separate scripts bypass API locks. Run seed/migration only with the application stopped. Approval announcement intent is stored on the event, then delivered with per-student upserts; notification reads retry pending announcements.
-
-## Migration and backup
-
-Before migrating an existing database, stop the app and make a backup using MongoDB Database Tools:
-
-```bat
-mongodump --uri="mongodb://127.0.0.1:27017/campus_connect" --out="backup-before-campus-v2"
-```
-
-If Database Tools are not installed, install them separately; they are not provided by npm. Compass JSON exports are useful for inspection but do not replace a full database backup with indexes.
-
-`npm run migrate` preserves documents, adds missing Organizer numbers and original creator fields, clears legacy blank number values, and creates indexes. Conflicting non-empty Organizer numbers stop migration with a review message; they are not overwritten. Running migration twice does not duplicate users or events. Existing approved events are marked as already announced to prevent a notification flood. If migration reports a duplicate number, resolve the ownership of that number explicitly, then rerun migration.
-
-## Test commands
-
-Install test dependencies with `npm install` first.
-
-```bat
-npm test
-npm run test:upgrades
-```
-
-These use `campus_connect_test`, **never the application database**. Tests delete the contents of that test database. Do not store any project data in it.
-
-Alternatively, `npm run test:isolated` downloads and starts a temporary real MongoDB process and runs both suites. It is not a mock database. The download needs internet the first time.
-
-Browser checks:
-
-```bat
-npx playwright install chromium
-npm run test:ui
-```
-
-Or set `CHROME_EXECUTABLE` to a compatible local Chromium executable. See `docs/VALIDATION.md` for what was actually checked in this delivery.
+**Aggregation reports** – Admin → **Reports** shows results of the `$match/$group/$project/$lookup/$unwind/$filter/$size/$avg/$sort` pipelines; **Export CSV** downloads them. In Compass → `events` → **Aggregations** tab, paste the pipelines from `docs/DATABASE.md`.
 
 ## Troubleshooting
+- **MongoDB connection refused / `ECONNREFUSED 127.0.0.1:27017`** – MongoDB is not running. Start the service (step 4). If MongoDB is installed but not as a service, run `"C:\Program Files\MongoDB\Server\<version>\bin\mongod.exe" --dbpath C:\data\db` in a separate window (create `C:\data\db` first).
+- **MongoDB service not running / won't start** – `services.msc` → *MongoDB Server* → Properties → Startup type *Automatic* → Start. If it fails, check the log in `C:\Program Files\MongoDB\Server\<version>\log\mongod.log`. `net start MongoDB` needs an *Administrator* terminal.
+- **npm: "running scripts is disabled on this system" (PowerShell)** – Run once: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, reopen the terminal. Or use *Command Prompt* instead of PowerShell.
+- **Port 3000 already in use** – Change `PORT=3001` in `.env` and open `http://localhost:3001`, or find the process: `netstat -ano | findstr :3000` then `taskkill /PID <pid> /F`.
+- **Database not visible in Compass** – MongoDB hides empty databases. Run `npm run seed` or `npm start`, press the refresh button in Compass, and make sure you connected to `mongodb://127.0.0.1:27017` (not a different host).
+- **"Your organizer account must be verified"** – Log in as `admin@campus.local` → **Organizer verification** → *Verify*. (The seeded organizer is already verified; newly registered organizers are not.)
+- **Event capacity validation errors** – Event capacity must be a positive whole number and ≤ the venue capacity (Innovation Lab = 60, Main Auditorium = 500, Sports Ground = 1000). Admins can raise a venue's capacity in **Venues**. Budgets above ₹10,000 need a budget breakdown; start must be in the future; duration ≥ 1 hour; description ≥ 50 characters.
+- **Tests fail with "Refusing to run"** – tests only run against a database whose name ends with `_test`. Do not set `TEST_MONGODB_URI` to the real database.
 
-| Problem | Action |
-|---|---|
-| Connection refused / database unavailable | Open Windows Services, find MongoDB Server, and start it. The server retries connection and the API returns a clear message while disconnected. |
-| PowerShell blocks npm.ps1 | Use Command Prompt or type `npm.cmd` instead of `npm`. |
-| Port 3000 in use | Stop the older app, or change both `PORT` and `APP_BASE_URL`. |
-| No database in Compass | Use the same MongoDB URI; run migration/seed, then refresh Compass. |
-| Organizer cannot manage events | Admin must mark the account active and verified. A revoked account keeps basic profile access only. |
-| Venue is occupied | Inspect Venue Availability. Pending events also reserve time; edit/cancel the conflicting event or pick another slot. |
-| Camera denied | Allow site camera permission in the browser, close other camera apps, or use image/manual entry. |
-| Reset email never arrives | Default mode prints the link in the server terminal; it does not send email. Configure SMTP for email. |
-| Write stays busy after a crash | Follow the lock recovery procedure above. |
-| Index/duplicate Organizer error | Stop the old app and run migration; review duplicate numbers without deleting unrelated data. |
-| Old UI appears | Restart the app and hard-refresh the browser with Ctrl+F5. |
+## Security notes
+scrypt-hashed passwords · server-side sessions in MongoDB with HttpOnly + SameSite cookies · role middleware · input validation + Mongoose validation · login rate limiting · origin check on writes · CSP and other security headers · 50 KB JSON limit · CSV formula-injection sanitising · secrets only via `.env`. For any non-localhost deployment you would also add HTTPS (`NODE_ENV=production` turns on the `Secure` cookie flag).
 
-See `docs/DEMO.md`, `docs/API.md`, `docs/DATABASE.md`, and `docs/CHANGES.md` for presentation and implementation details.
+## Scope notes
+- Student "attend/check-in" is performed by the organizer scanning/typing the student's QR ticket code (a student cannot check themselves in from home). Camera scanning is not built in – use any QR scanner app or a handheld scanner that types the code.
+- Poster/image upload, e-mail confirmation links and sentiment analysis from the original requirements PDF are not part of this prototype.

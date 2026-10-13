@@ -1,104 +1,115 @@
-# MongoDB design — Campus Connect 2
+# Database design – `campus_connect`
 
-The application connects to local MongoDB through Mongoose. Compass lets you inspect it. No browser accesses MongoDB directly.
+## Design overview
+Seven collections. **Registrations are embedded inside events**; users, venues and events are linked by **references** (`ObjectId`).
+
+```
+users ◄──────────── events.organizer
+venues ◄─────────── events.venue
+users ◄──────────── events.registrations[].student      (embedded sub-documents)
+events,users ◄───── feedbacks.event / feedbacks.student
+users ◄──────────── notifications.user, suggestions.user, sessions.user
+```
 
 ## Collections
+**users** `name, email*, passwordHash, phone, role (admin|organizer|student), interests[], organizationNumber, verified, active, createdAt, updatedAt`
 
-| Collection | Main fields and purpose |
-|---|---|
-| users | Name, email, phone, scrypt password hash, role, active, verified, interests, optional generated organizationNumber, authVersion, optional resetHash/resetExpiresAt. Password/reset/version fields are excluded from JSON responses. |
-| venues | Name, location, capacity, amenities, active, timestamps. |
-| events | Title/titleKey/dateKey, description, category, UTC start/end, venue and organizer references, originalCreator, capacity/budget/budgetNotes, status, reasons, needsAttention, firstApprovedAt/announcementPending, embedded registrations, version. |
-| feedbacks | Event/student references, integer rating 1–5, comment, timestamps. |
-| notifications | User reference, optional event reference, message, read, deleted, optional dedupeKey, createdAt. Deletion hides the notification while retaining deduplication history. |
-| suggestions | User reference, text, status and timestamps. |
-| sessions | Hashed opaque session token, user reference, authVersion, expiry. TTL index expires old session records. |
-| counters | Atomic sequence per year used for Organizer numbers. Gaps are acceptable; numbers are never reused based on a document count. |
-| audit_logs | Actor, action, target ID, reason, non-sensitive changes and timestamp. |
-| write_locks | Temporary database-wide mutation lock; unique `_id`, random owner and acquisition time. No automatic expiry. |
+**venues** `name*, location, capacity, amenities[], active, createdAt, updatedAt` (archive = `active:false`)
 
-Embedded registrations contain student, status, ticketCode, registeredAt, checkedInAt, and checkedInBy. Cancelled entries remain as history. Re-registration appends a new entry. Statuses: registered, waitlisted, checked-in, cancelled, no-show.
+**events** `title, titleKey, dateKey, description, category, start, end, venue→venues, organizer→users, capacity, budget, budgetNotes, status, rejectionReason, registrations[], createdAt, updatedAt, __v`
+- `registrations[]` item: `{ _id, student→users, status (registered|waitlisted|checked-in|cancelled|no-show), ticketCode, registeredAt, checkedInAt }`
+- `titleKey` (lower-cased title) and `dateKey` (YYYY-MM-DD) exist only to support the "same organizer, same title, same date" unique index.
+
+**feedbacks** `event→events, student→users, rating 1-5, comment ≤1000, createdAt, updatedAt`
+**notifications** `user→users, message, read, createdAt`
+**suggestions** `user→users, text, status (Submitted|In progress|Implemented), createdAt, updatedAt`
+**sessions** `tokenHash, user→users, expiresAt` (the cookie holds a random token; only its SHA-256 hash is stored)
 
 ## Indexes
+| Collection | Index | Why |
+|---|---|---|
+| users | `{email:1}` unique | one account per email |
+| venues | `{name:1}` unique | no duplicate venues |
+| events | `{organizer:1, dateKey:1, titleKey:1}` unique | same organizer cannot reuse a title on a date |
+| events | `{status:1, start:1}` | event lists by status/date |
+| events | `{registrations.student:1}` (multikey) | "my events" lookup |
+| events | `{venue:1, start:1, end:1}` | venue overlap check |
+| events | `{registrations.ticketCode:1}` unique, partial | ticket uniqueness + fast check-in lookup |
+| feedbacks | `{event:1, student:1}` unique | one feedback per student per event |
+| notifications | `{user:1, createdAt:-1}` | newest-first inbox |
+| sessions | `{tokenHash:1}` unique | session lookup |
+| sessions | `{expiresAt:1}` TTL (`expireAfterSeconds:0`) | MongoDB deletes expired sessions automatically |
 
-- Unique user email.
-- Unique Organizer number, partial index applying only to string values. Legacy blank values are removed by migration.
-- Unique venue name.
-- Unique event organizer/dateKey/titleKey combination.
-- Event status/start, venue/start/end, registrations.student.
-- Unique ticket codes across event documents via a partial multikey index; application generation and conditional updates also protect embedded registrations.
-- Unique feedback event/student.
-- Notifications user/createdAt and unique user/dedupeKey for announcement deduplication.
-- Unique session tokenHash and expiry TTL.
-- Audit createdAt for recent-first pagination.
-- Counters and write locks use MongoDB's unique `_id` index.
+The ticket-code index is *partial* (`registrations.ticketCode` exists) because a plain unique multikey index would treat every empty `registrations` array as the same key.
 
-## Embedding and referencing
+## CRUD operations used
+| Operation | Example |
+|---|---|
+| Create | `Event.create`, `Venue.create`, `User.create`, `Event.updateOne({…},{$push:{registrations:reg}})` |
+| Read | `Event.find(filter).populate('venue organizer')`, `Feedback.findOne` |
+| Update | `Event.updateOne({_id, __v}, {$set:{'registrations.2.status':'cancelled'}, $inc:{__v:1}})` |
+| Delete | `Notification.deleteOne`, `Feedback.deleteOne`, `Session.deleteMany`. Events/venues/users are *archived or deactivated*, never hard-deleted, so reports stay accurate |
 
-Registrations are embedded to support atomic seat decisions, waitlist promotion, and check-in within one event document. Users and venues are referenced because multiple events share them. Feedback is separate for unique student/event validation and aggregation.
+## Concurrency (the last seat)
+Registration and cancellation read the event, decide the new status in code, then update with the filter `{ _id, __v: <version read> }` and `$inc: { __v: 1 }`. If another student changed the document in between, `modifiedCount` is 0 and the operation re-reads and retries (so the second student sees the event is now full and is waitlisted). This is **optimistic concurrency control** and needs no locks. A `registrations: {$not: {$elemMatch …}}` condition additionally prevents duplicate registrations.
 
-Limitations: very large events can approach MongoDB's document size limit; this model targets a college prototype. A production-scale version could separate registration documents and use transactions/counters. Referenced documents are not automatically protected by SQL-style foreign keys; backend validation enforces existence and ownership. Archive/deactivation retains history instead of deleting referenced users/events.
-
-## Concurrency
-
-API mutations use a MongoDB-backed exclusive lock with no expiry. This serializes venue check-and-write operations and administrative decisions across local server processes. The lock is released after each request; a crashed process can leave it requiring explicit recovery with all servers stopped. This is described in README. It works with standalone MongoDB.
-
-Event registration also uses a compare-and-swap filter on `__v`, and successful mutations increment the version. Check-in requires Approved status, current version, and a registered matching ticket. Mongoose event saves use optimistic concurrency.
-
-These mechanisms prevent simultaneous API booking conflicts but do not create multi-document transactional rollback. A failure between a user save and audit/notification creation may leave only the principal update committed. Inspect/reconcile that operation after a crash. Scripts and direct Compass edits must not run concurrently with the application.
-
-## Password recovery
-
-Reset hash and expiry are embedded on the user so a conditional update can atomically set the new password, increment authVersion, and remove the token. This avoids a token-consumed/password-unchanged failure across two documents. **Do not add a TTL index to users.resetExpiresAt**: that would delete the user. Expiry is checked explicitly; obsolete hashes may remain until replaced/consumed, but cannot authenticate. Session TTL cleanup is only storage cleanup; every request checks expiry and current authVersion.
-
-## Announcement delivery
-
-The first approval stores firstApprovedAt and announcementPending on the event. Recipient writes upsert notifications with unique user/dedupeKey. The marker is cleared after the batch succeeds. Notification reads retry unfinished fanout. Students created after the original approval timestamp are not included in its retry audience. Reapproval never re-broadcasts the first announcement. Deleted notifications retain a dedupe record.
-
-## Time and CRUD
-
-MongoDB Date values are UTC instants. Website datetime inputs are interpreted as IST; event dateKey uses the IST calendar date. Create/update validation checks dates and capacity. Admin status changes implement approval, rejection, completion, cancellation and archival. Deletes are soft for venues/accounts/event history and notifications; feedback can be physically deleted by its owner.
-
-Compass Filter examples (not shell commands):
-
-```javascript
-{ role: "organizer", verified: false }
-{ status: "Approved" }
-{ needsAttention: true }
-{ "registrations.status": "waitlisted" }
-{ "registrations.status": "checked-in" }
-{ announcementPending: true }
-```
-
-Mongosh examples:
-
-```javascript
-use campus_connect
-show collections
-db.events.find({status: "Approved"}, {title: 1, start: 1, venue: 1})
-db.events.getIndexes()
-db.users.find({role: "organizer"}, {name: 1, organizationNumber: 1, verified: 1})
-```
-
-## Aggregation demonstration
-
-In Compass, open events → Aggregations → text mode and paste:
-
-```javascript
+## Aggregation pipelines (paste into Compass → `events` → Aggregations)
+**Per-event registration counts (`$project` + `$filter` + `$size`)**
+```js
 [
-  { $match: { status: { $in: ["Approved", "Completed", "Archived"] } } },
-  { $project: {
-      title: 1, category: 1,
-      attendance: { $size: { $filter: {
-        input: "$registrations", as: "r",
-        cond: { $eq: ["$$r.status", "checked-in"] }
-      } } }
-  } },
-  { $group: { _id: "$category", events: { $sum: 1 }, attendees: { $sum: "$attendance" } } },
-  { $sort: { attendees: -1 } }
+  { $project: { title: 1, status: 1, capacity: 1,
+      registered: { $size: { $filter: { input: "$registrations", as: "r", cond: { $eq: ["$$r.status", "registered"] } } } },
+      waitlisted: { $size: { $filter: { input: "$registrations", as: "r", cond: { $eq: ["$$r.status", "waitlisted"] } } } },
+      checkedIn:  { $size: { $filter: { input: "$registrations", as: "r", cond: { $eq: ["$$r.status", "checked-in"] } } } } } },
+  { $sort: { title: 1 } }
 ]
 ```
+**Events by category (`$group`)**
+```js
+[ { $group: { _id: "$category", events: { $sum: 1 }, totalCapacity: { $sum: "$capacity" } } }, { $sort: { events: -1 } } ]
+```
+**Venue usage (`$group` + `$lookup` + `$unwind`)**
+```js
+[
+  { $match: { status: { $in: ["Pending", "Approved", "Completed"] } } },
+  { $group: { _id: "$venue", events: { $sum: 1 }, hours: { $sum: { $divide: [{ $subtract: ["$end", "$start"] }, 3600000] } } } },
+  { $lookup: { from: "venues", localField: "_id", foreignField: "_id", as: "venue" } },
+  { $unwind: "$venue" },
+  { $project: { _id: 0, venue: "$venue.name", events: 1, hours: 1 } }
+]
+```
+**Average rating per event (`$lookup` + `$avg`)**
+```js
+[
+  { $lookup: { from: "feedbacks", localField: "_id", foreignField: "event", as: "fb" } },
+  { $project: { title: 1, feedbackCount: { $size: "$fb" }, avgRating: { $avg: "$fb.rating" } } }
+]
+```
+**Unwinding embedded registrations – registrations per student**
+```js
+[ { $unwind: "$registrations" }, { $group: { _id: "$registrations.student", registrations: { $sum: 1 } } }, { $sort: { registrations: -1 } } ]
+```
+The application's own pipelines live in `src/domain.js` (`buildReport`).
 
-The reports endpoint additionally uses `$lookup` for feedback/venue/user references, `$unwind`, `$avg`, and `$round`. Attendance rate uses ended events so future registrations do not reduce the rate. See `src/domain.js` for the complete pipelines.
+## Handy Compass filters
+```js
+{ status: "Pending" }                                   // events awaiting approval
+{ "registrations.status": "waitlisted" }                // events with a waitlist
+{ title: "One-seat Waitlist Demo" }                     // one event
+{ registrations: { $elemMatch: { status: "checked-in" } } }
+{ role: "organizer", verified: false }                  // users: unverified organizers
+{ start: { $gte: new Date() } }                         // upcoming (use ISODate in older Compass)
+```
 
-Advanced DBMS concepts demonstrated: document modeling, embedded/reference relationships, compound/partial/unique/TTL indexes, CRUD, aggregation joins, optimistic concurrency, atomic counters, idempotent delivery, access control, and audit trails.
+## Why registrations are embedded in events
+- A registration has no meaning without its event and is always read together with it (attendee list, seat count, waitlist order).
+- The seat count, waitlist promotion and duplicate check all happen in **one document**, so a single atomic write (guarded by `__v`) is enough – MongoDB guarantees single-document atomicity without multi-document transactions.
+- Array order = registration order, which gives a natural FIFO waitlist.
+- Reports use `$filter/$size` on the array – no joins.
+
+**Advantages:** fewer queries, atomic seat allocation, simple waitlist, history preserved (cancelled entries stay in the array).
+**Limitations:** the 16 MB document limit (fine for campus events with thousands of registrations, not millions); "all events of a student" needs the multikey index on `registrations.student`; very hot events rewrite a growing document; students' own history is not a first-class collection (queried through `events`).
+Users, venues and feedback are *referenced* because they are shared across many events, change independently, and are queried on their own.
+
+## DBMS concepts demonstrated
+Document data model · embedding vs referencing (denormalisation trade-off) · primary keys (`_id`) and foreign-key style references · schema validation (Mongoose) · unique, compound, multikey, partial and TTL indexes · CRUD · aggregation framework (pipeline model, `$lookup` as a left outer join) · optimistic concurrency control · atomic single-document updates · referential rules enforced in application code (venue cannot be archived while in use) · soft deletion/archival · authentication/authorization (RBAC) · query optimisation through indexing.

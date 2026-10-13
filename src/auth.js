@@ -32,8 +32,7 @@ const cookieStr = (value, maxAgeSec) =>
 
 async function startSession(res, userId) {
   const token = crypto.randomBytes(32).toString('base64url');
-  const current = await User.findById(userId);
-  await Session.create({ authVersion: current.authVersion || 0, tokenHash: sha(token), user: userId, expiresAt: new Date(Date.now() + SESSION_MS) });
+  await Session.create({ tokenHash: sha(token), user: userId, expiresAt: new Date(Date.now() + SESSION_MS) });
   res.setHeader('Set-Cookie', cookieStr(token, SESSION_MS / 1000));
 }
 async function endSession(req, res) {
@@ -48,7 +47,7 @@ async function loadUser(req, _res, next) {
     if (token) {
       const s = await Session.findOne({ tokenHash: sha(token), expiresAt: { $gt: new Date() } });
       const u = s && (await User.findById(s.user));
-      if (u && u.active && (u.authVersion || 0) === (s.authVersion || 0)) req.user = u;
+      if (u && u.active) req.user = u;
     }
     next();
   } catch (e) { next(e); }

@@ -14,7 +14,6 @@ let base; const results = []; const S = {};
 function client() {
   let cookie = '';
   const call = async (method, path, body) => {
-    if (method === 'PATCH' && path.startsWith('/users/')) body = { reason: 'Integration test account administration', ...body };
     const r = await fetch(base + '/api' + path, { method, headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { cookie } : {}) }, body: body ? JSON.stringify(body) : undefined });
     for (const c of r.headers.getSetCookie?.() || []) { const kv = c.split(';')[0]; cookie = kv.endsWith('=') ? '' : kv; }
     const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = text; }
@@ -61,7 +60,7 @@ const approve = async (id) => (await S.admin('PATCH', `/events/${id}/status`, { 
     assert.equal((await register(S.anon, 'X Y', 'n1@test.local', 'student', { phone: '123' })).status, 400);
     assert.equal((await register(S.anon, 'X Y', 'n2@test.local', 'student', { password: 'short' })).status, 400);
     assert.equal((await register(S.anon, 'X Y', 'n3@test.local', 'admin')).status, 400);
-    const generated = await register(client(), 'X Y', 'n4@test.local', 'organizer', { organizationNumber: '' }); assert.equal(generated.status, 201); assert.match(generated.data.user.organizationNumber, /^ORG-/);
+    assert.equal((await register(S.anon, 'X Y', 'n4@test.local', 'organizer', { organizationNumber: '' })).status, 400);
   });
   await t('login/logout flow with HttpOnly SameSite cookie', async () => {
     const c = client(); assert.equal((await login(c, 's1@test.local', 'wrong-pass-1')).status, 401);
@@ -86,7 +85,7 @@ const approve = async (id) => (await S.admin('PATCH', `/events/${id}/status`, { 
   });
   await t('profile update cannot escalate role', async () => {
     const r = await S.s4('PATCH', '/profile', { name: 'Stu Four', role: 'admin', verified: false, active: true, interests: 'Chess' });
-    assert.equal(r.status, 400); assert.equal((await S.s4('GET', '/auth/me')).data.user.role, 'student');
+    assert.equal(r.status, 200); assert.equal(r.data.user.role, 'student'); assert.deepEqual(r.data.user.interests, ['Chess']);
   });
 
   // ---- venues ----
@@ -96,7 +95,7 @@ const approve = async (id) => (await S.admin('PATCH', `/events/${id}/status`, { 
     S.lab = (await S.admin('POST', '/venues', { name: 'Lab', location: 'Block C', capacity: 30 })).data.venue;
     assert.equal((await S.admin('POST', '/venues', { name: 'Hall', location: 'x', capacity: 5 })).status, 409);
     assert.equal((await S.admin('POST', '/venues', { name: 'Bad', location: 'x', capacity: -5 })).status, 400);
-    assert.equal((await S.admin('GET', '/venues')).data.venues.length, 3);
+    assert.equal((await S.org('GET', '/venues')).data.venues.length, 3);
   });
 
   // ---- organizer verification ----
@@ -248,9 +247,49 @@ const approve = async (id) => (await S.admin('PATCH', `/events/${id}/status`, { 
   });
   await t('event cancellation notifies registered students', async () => {
     const before = (await S.s2('GET', '/notifications')).data.notifications.length;
-    assert.equal((await S.org('PATCH', `/events/${S.e1._id}/status`, { status: 'Cancelled', reason: 'Cancelled for integration test' })).status, 200);
+    assert.equal((await S.org('PATCH', `/events/${S.e1._id}/status`, { status: 'Cancelled' })).status, 200);
     assert.ok((await S.s2('GET', '/notifications')).data.notifications.length > before);
     assert.equal((await S.s4('POST', `/events/${S.e1._id}/register`)).status, 409);
+  });
+
+  await t('empty events can be deleted but events with registration history are protected', async () => {
+    const created = await S.org('POST', '/events', evBody({ title: 'Empty event delete test', venue: S.lab._id }));
+    assert.equal(created.status, 201);
+    assert.equal((await S.org('DELETE', `/events/${created.data.event._id}`)).status, 200);
+    assert.equal((await S.org('DELETE', `/events/${S.e1._id}`)).status, 409, 'cancelled event retains registration history');
+  });
+
+  await t('ongoing events cannot be edited, cancelled, deleted, or have registrations removed; organizer remains active', async () => {
+    const start = new Date(Date.now() - 30 * 60000); const end = new Date(Date.now() + 30 * 60000);
+    const ongoing = await M.Event.create({
+      title: 'Ongoing protection test', titleKey: 'ongoing protection test', dateKey: start.toISOString().slice(0, 10),
+      description: DESC, category: 'Workshop', start, end, venue: S.hall._id, organizer: S.orgId,
+      capacity: 10, budget: 0, status: 'Approved',
+      registrations: [{ student: S.s2id, status: 'registered', ticketCode: 'TKT-ONGOING0001', registeredAt: new Date() }],
+    });
+    const edit = await S.org('PATCH', `/events/${ongoing._id}`, { title: 'Changed ongoing title' });
+    assert.equal(edit.status, 409); assert.match(edit.data.error, /ongoing event/i);
+    assert.equal((await S.org('PATCH', `/events/${ongoing._id}/status`, { status: 'Cancelled' })).status, 409);
+    assert.equal((await S.org('DELETE', `/events/${ongoing._id}`)).status, 409);
+    assert.equal((await S.s2('DELETE', `/events/${ongoing._id}/register`)).status, 409);
+    assert.equal((await S.s3('POST', `/events/${ongoing._id}/register`)).status, 409);
+    assert.equal((await S.admin('PATCH', `/users/${S.orgId}`, { active: false })).status, 409);
+    assert.equal((await S.admin('PATCH', `/users/${S.orgId}`, { verified: false })).status, 409);
+    assert.equal((await S.admin('PATCH', `/users/${S.s2id}`, { active: false })).status, 409);
+    assert.equal((await S.org('DELETE', '/profile')).status, 409);
+    await M.Event.deleteOne({ _id: ongoing._id });
+  });
+
+  await t('students cannot register for completed events', async () => {
+    const start = new Date(Date.now() - 3 * 3600000); const end = new Date(Date.now() - 2 * 3600000);
+    const completed = await M.Event.create({
+      title: 'Completed registration block test', titleKey: 'completed registration block test', dateKey: start.toISOString().slice(0, 10),
+      description: DESC, category: 'Workshop', start, end, venue: S.lab._id, organizer: S.orgId,
+      capacity: 10, budget: 0, status: 'Completed', registrations: [],
+    });
+    const r = await S.s3('POST', `/events/${completed._id}/register`);
+    assert.equal(r.status, 409); assert.match(r.data.error, /completed/i);
+    await M.Event.deleteOne({ _id: completed._id });
   });
 
   // ---- suggestions ----
@@ -270,7 +309,7 @@ const approve = async (id) => (await S.admin('PATCH', `/events/${id}/status`, { 
     assert.ok(a.data.events.total >= 4); assert.ok(a.data.events.cancelled >= 1); assert.ok(Array.isArray(a.data.byCategory) && a.data.byCategory.length); assert.ok(a.data.venueUsage.every((v) => v.venue));
     assert.equal(a.data.summary.noShowCount, 1); assert.equal(a.data.summary.attendanceRate, 50); assert.equal(a.data.summary.averageRating, 4); assert.equal(a.data.summary.feedbackCount, 1);
     const o = await S.org('GET', '/reports'); assert.equal(o.status, 200); assert.equal(o.data.summary.attendanceCount, 2); assert.ok(o.data.eventWise.length >= 4);
-    const o2 = await S.org2('GET', '/reports'); assert.equal(o2.status, 403);
+    const o2 = await S.org2('GET', '/reports'); assert.equal(o2.data.eventWise.length, 0);
   });
   await t('CSV export neutralises formula injection', async () => {
     const [s, e] = when(12, 10); const c = await S.org('POST', '/events', evBody({ title: '=HYPERLINK("http://evil")', venue: S.lab._id, start: s, end: e })); assert.equal(c.status, 201);

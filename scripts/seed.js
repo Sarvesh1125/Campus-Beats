@@ -21,14 +21,14 @@ function at(daysFromNow, hour, hours = 3) {
 
   const people = [
     { name: 'Campus Admin', email: 'admin@campus.local', phone: '9000000001', role: 'admin', verified: true },
-    { name: 'Olivia Organizer', email: 'organizer@campus.local', phone: '9000000002', role: 'organizer', verified: true, interests: ['Technology', 'Culture'] },
+    { name: 'Olivia Organizer', email: 'organizer@campus.local', phone: '9000000002', role: 'organizer', verified: true, organizationNumber: 'ORG-2026-001', interests: ['Technology', 'Culture'] },
     { name: 'Sam Student', email: 'student@campus.local', phone: '9000000003', role: 'student', verified: true, interests: ['AI', 'Music'] },
     { name: 'Riya Student', email: 'student2@campus.local', phone: '9000000004', role: 'student', verified: true, interests: ['Sports', 'Design'] },
   ];
   const users = {};
   for (const p of people) {
     let u = await User.findOne({ email: p.email });
-    if (!u) { if(p.role === 'organizer') p.organizationNumber = await require('../src/upgrades').nextOrgNumber(); u = await User.create({ ...p, passwordHash: await hashPassword(PASSWORD) }); out.users++; }
+    if (!u) { u = await User.create({ ...p, passwordHash: await hashPassword(PASSWORD) }); out.users++; }
     users[p.role + (p.email.includes('student2') ? '2' : '')] = u;
   }
 
@@ -58,8 +58,8 @@ function at(daysFromNow, hour, hours = 3) {
     if (await Event.exists({ organizer: users.organizer._id, titleKey: d.title.toLowerCase() })) continue;
     const [start, end] = d.when;
     const ev = {
-      title: d.title, titleKey: d.title.toLowerCase(), dateKey: new Date(start.getTime()+19800000).toISOString().slice(0, 10), description: DESC(d.title),
-      category: d.category, start, end, venue: venues[d.venue]._id, organizer: users.organizer._id, originalCreator: users.organizer._id, ...(d.status === 'Approved' ? { firstApprovedAt: new Date(), announcementPending: false } : {}), capacity: d.capacity,
+      title: d.title, titleKey: d.title.toLowerCase(), dateKey: start.toISOString().slice(0, 10), description: DESC(d.title),
+      category: d.category, start, end, venue: venues[d.venue]._id, organizer: users.organizer._id, capacity: d.capacity,
       budget: d.budget || 0, budgetNotes: d.budgetNotes || '', status: d.status, registrations: [],
     };
     if (d.demoTicket) ev.registrations.push({ student: users.student._id, status: 'registered', ticketCode: 'TKT-DEMO0001' });

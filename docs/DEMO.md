@@ -1,71 +1,38 @@
-# Advanced DBMS presentation demonstration
+# Presentation demo script (≈10 minutes)
 
-Start MongoDB and the application. Open http://localhost:3000 and Compass connected to the same local server. Keep the terminal visible for development password setup links.
+**Before you start:** MongoDB service running · `npm run seed` done · `npm start` running · Compass connected to `mongodb://127.0.0.1:27017` with `campus_connect → events` open · use two browser windows (one normal, one private/incognito) so two students can be logged in at once. All passwords: `Campus@123`.
 
-## 1. Database design (one minute)
+## 1. Student – browse and register
+1. Open <http://localhost:3000>, log in `student@campus.local`.
+2. **Discover events** → search "AI", filter by category *Workshop* → open **Build with AI** to show details.
+3. Open **One-seat Waitlist Demo** → **Register** → toast "Registered! Your QR ticket is ready".
+4. **My events** → *View details* → **View QR ticket** – QR with ticket code below it.
 
-Show users, venues and events. Explain that user/venue IDs are references, while registrations are embedded in events for atomic seat decisions. Show compound indexes in Compass. Explain that Compass is a GUI; Express communicates with MongoDB.
+## 2. Show the Compass document
+5. Compass → `events` → Filter `{ title: "One-seat Waitlist Demo" }` → refresh.
+6. Expand `registrations`: one embedded item `{student, status:"registered", ticketCode, registeredAt}`. Explain embedding and `__v` (optimistic concurrency).
 
-## 2. Student registration and waitlist
+## 3. Second student – waitlist and promotion
+7. In the private window log in `student2@campus.local` → open the same event → button now says **Join waitlist** → click it.
+8. Compass refresh → second item with `status:"waitlisted"`.
+9. Back in window 1 (student 1) → event details → **Cancel registration** → confirm.
+10. Compass refresh: first item `cancelled` (history kept), second item now **`registered`** – automatic promotion. Show student 2's **Notifications** ("a seat opened up").
 
-1. Log in as `student@campus.local`, password `Campus@123` on a fresh seed.
-2. Discover → One-seat Waitlist Demo → Register. Show its registration and QR ticket in Compass/events.
-3. In a private browser window, log in as `student2@campus.local` and register for the same event. It becomes waitlisted.
-4. Cancel the first Student's registration before event start. Refresh the second Student's notifications: the earliest waiting Student is promoted.
-5. Show the cancelled history entry and promoted registration in the same event document.
+## 4. Organizer – QR check-in
+11. Log in `organizer@campus.local` → **Check-in** → event *Live Check-in Practice* → ticket code `TKT-DEMO0001` (or the code shown on student 1's ticket after registering) → **Check in** → green confirmation.
+12. Enter the same code again → "already been checked in" error. Enter `TKT-FAKE` → "Invalid ticket code".
+13. Compass: that registration has `status:"checked-in"` and `checkedInAt`.
+14. *Manage events* → **Attendees** to show the table; *Create event* to show validation messages (try capacity above venue capacity, or a start in the past).
 
-## 3. Organizer number and Admin permissions
+## 5. Admin – approvals and reports
+15. Log in `admin@campus.local` → **Event approvals** → **Approve** *Cyber Security Summit* (and show **Reject** with a reason dialog). The organizer receives a notification.
+16. **Organizer verification**, **Venues** (try archiving *Main Auditorium* → blocked because it has upcoming events), **Users**.
+17. **Reports** → show cards, category, venue usage and event-wise tables → click **Export CSV**.
 
-Register a new Organizer without entering an Organizer number. Inspect its generated ORG identifier. Admin → Users → Manage verifies it. Show that Students cannot choose Admin on the public registration form.
+## 6. Aggregation in Compass
+18. Compass → `events` → **Aggregations** tab → paste the "Per-event registration counts" pipeline from `docs/DATABASE.md` → show output (uses `$project`, `$filter`, `$size`).
+19. Paste "Venue usage" (`$group`, `$lookup`, `$unwind`) and show it matches the Reports page.
+20. Optional: **Indexes** tab on `events` – point at the unique `organizer+dateKey+titleKey` and `venue+start+end` indexes; `sessions` → TTL index.
 
-Admin → Users → Create user demonstrates role assignment. To create an Admin, enter the current Admin password and confirm the grant. Open its password setup link from the backend terminal in a private window. Do not display or share unrelated terminal reset links.
-
-## 4. Venue availability and first approval
-
-1. Organizer → Create event. Select venue, future time, positive capacity and a 50+ character description.
-2. Check venue availability. A conflicting pending/approved event prevents saving. End exactly at another event's start to demonstrate an allowed adjacent slot.
-3. Submit. Show Pending in Compass.
-4. Admin → Event approvals → Approve.
-5. Student → Notifications shows the announcement, event time and venue. Click Event details.
-6. Inspect notification dedupeKey in Compass. Reapproval after an edit does not duplicate the original announcement.
-
-## 5. QR check-in
-
-On a fresh seed, choose Live Check-in Practice; it starts in about 30 minutes. Student's ticket is `TKT-DEMO0001`.
-
-Admin → Scan QR (or Organizer → Check-in) → select that event → Start Camera. Show the Student's QR from another screen. If no camera is available, save/screenshot the QR and upload it, or enter the ticket code. Show success and increased attendance. Scanning again is rejected. Inspect checkedInAt/checkedInBy in Compass.
-
-If that sample event has expired, create a new event starting within an hour, approve it, register a Student and use that ticket. Seeding never overwrites old event times.
-
-## 6. Access revocation during an event
-
-1. Keep the Organizer logged in in a separate window.
-2. Admin → Users → Manage that Organizer. Review affected events, set Verified to Unverified, and enter a reason.
-3. The Organizer can read notifications/profile but cannot manage events or check in attendees.
-4. Deactivate the account; its existing session stops working.
-5. Show that the event, ticket, and registrations still exist.
-6. Admin → All events → Reassign to another active, verified Organizer. Show originalCreator remains unchanged. Admin can also continue scanning tickets directly.
-
-For a truly ongoing event, schedule a new event a few minutes ahead and perform this step after it starts. Do not alter your computer clock.
-
-## 7. Calendar views
-
-- Student: registered/waitlisted/checked-in events, with visible waitlist status.
-- Organizer: own events and other Organizers' approved public events. Private budgets/attendees are not exposed.
-- Admin: all relevant statuses, details and management entry points.
-- Switch month/week/agenda and inspect mobile agenda layout. All displayed schedule times are IST.
-
-## 8. Password recovery and reports
-
-Log out → Forgot password → enter a demo email. Open the terminal link and reset within 15 minutes. A used or expired link is rejected; old sessions expire. Console mode is a local demo, not a sent email.
-
-Admin → Reports: explain live MongoDB aggregation counts, attendance and feedback. Export CSV. In Compass → events → Aggregations, run the example in DATABASE.md. End with Admin → Audit log to show account and lifecycle actions with actor, reason and timestamp.
-
-## Manual checks on your laptop
-
-- Allow and deny camera permission; verify a useful message and image/manual fallback.
-- Scan a real Student QR once and again; verify success then duplicate rejection.
-- Stop camera, navigate away and verify the camera indicator turns off.
-- Try keyboard Tab/Shift+Tab/Escape in dialogs.
-- Check phone-sized layout and switch to agenda for comfortable calendar reading.
-- If configuring SMTP, test delivery with your own provider; development console mode works without it.
+## Talking points
+Embedded registrations + atomic seat allocation · optimistic concurrency · references for users/venues · indexes · aggregation framework · RBAC and session security.

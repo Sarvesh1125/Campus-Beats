@@ -7,31 +7,29 @@ const QRCode = require('qrcode');
 const M = require('./models');
 const D = require('./domain');
 const A = require('./auth');
-const U = require('./upgrades');
 
 const { User, Venue, Event, Feedback, Notification, Suggestion, Session } = M;
 const { HttpError } = D;
 const oid = (v) => new mongoose.Types.ObjectId(String(v));
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const wrap = (fn) => (req, res, next) => {
-  const run = async () => {
-    if (req.user) {
-      const fresh = await User.findById(req.user._id);
-      if (!fresh || !fresh.active || fresh.role !== req.user.role || (fresh.authVersion || 0) !== (req.user.authVersion || 0)) throw new HttpError(401, 'Session expired');
-      req.user = fresh;
-      if (fresh.role === 'organizer' && !fresh.verified && /^\/(events|reports|venues|calendar)/.test(req.path)) throw new HttpError(403, 'Organizer verification is required. Your profile and notifications remain available.');
-    }
-    return fn(req, res, next);
-  };
-  Promise.resolve(['POST','PUT','PATCH','DELETE'].includes(req.method) ? U.locked(run) : run()).catch(next);
-};
+const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const notify = (users, message) => {
   const list = (Array.isArray(users) ? users : [users]).filter(Boolean);
-  return list.length ? Notification.insertMany(list.map((u) => ({ user: u, message: message.slice(0, 500) }))) : null;
+  return list.length ? Notification.insertMany(list.map((u) => ({ user: u, message }))) : null;
 };
 const fmt = (d) => new Date(d).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
 const ticketCode = () => 'TKT-' + crypto.randomBytes(5).toString('hex').toUpperCase();
-const canManage = (u, ev) => u.role === 'admin' || (u.role === 'organizer' && u.verified && String(ev.organizer._id || ev.organizer) === String(u._id));
+const canManage = (u, ev) => u.role === 'admin' || String(ev.organizer._id || ev.organizer) === String(u._id);
+const TERMINAL_EVENT_STATUSES = ['Cancelled', 'Rejected', 'Completed', 'Archived'];
+const hasStarted = (ev, now = new Date()) => !TERMINAL_EVENT_STATUSES.includes(ev.status) && new Date(ev.start) <= now;
+const isOngoing = (ev, now = new Date()) => hasStarted(ev, now) && new Date(ev.end) > now;
+const organizerHasOngoingEvent = (organizerId, now = new Date()) => Event.exists({
+  organizer: organizerId, status: { $nin: TERMINAL_EVENT_STATUSES }, start: { $lte: now }, end: { $gt: now },
+});
+const studentHasOngoingRegistration = (studentId, now = new Date()) => Event.exists({
+  status: { $nin: TERMINAL_EVENT_STATUSES }, start: { $lte: now }, end: { $gt: now },
+  registrations: { $elemMatch: { student: studentId, status: { $in: ['registered', 'checked-in', 'waitlisted'] } } },
+});
 
 function createApp() {
   const app = express();
@@ -39,14 +37,13 @@ function createApp() {
 
   app.use((req, res, next) => {
     res.set({
-      'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+      'Content-Security-Policy': "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
       'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin',
-      'Permissions-Policy': 'camera=(self), microphone=(), geolocation=()', 'Cross-Origin-Opener-Policy': 'same-origin',
+      'Permissions-Policy': 'camera=(), microphone=(), geolocation=()', 'Cross-Origin-Opener-Policy': 'same-origin',
     });
     if (req.path.startsWith('/api')) res.set('Cache-Control', 'no-store');
     next();
   });
-  app.use('/vendor/qr-scanner', express.static(path.join(__dirname, '..', 'node_modules', 'qr-scanner')));
   app.use(express.json({ limit: '50kb' }));
   // CSRF defence in depth (cookie is SameSite): reject cross-origin browser writes.
   app.use((req, _res, next) => {
@@ -59,7 +56,6 @@ function createApp() {
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
   const api = express.Router();
-  api.use((req, res, next) => mongoose.connection.readyState === 1 ? next() : res.status(503).json({ error: 'Database unavailable. Start the MongoDB service, then retry.' }));
   api.use(A.loadUser);
   api.use(A.duplicateGuard);
   api.param('id', (req, _res, next, id) => (mongoose.isValidObjectId(id) ? next() : next(new HttpError(404, 'Record not found'))));
@@ -72,7 +68,6 @@ function createApp() {
     const d = D.validateRegistration(req.body || {});
     if (await User.exists({ email: d.email })) throw new HttpError(409, 'Email is already registered');
     try {
-      if (d.role === 'organizer') d.organizationNumber = await U.nextOrgNumber();
       const u = await User.create({ ...d, passwordHash: await A.hashPassword(d.password), verified: d.role === 'student' });
       await A.startSession(res, u._id);
       res.status(201).json({ user: u });
@@ -97,32 +92,65 @@ function createApp() {
     if (b.name !== undefined) { const n = D.str(b.name, 100); n.length < 2 ? errors.push('Name must be at least 2 characters') : (u.name = n); }
     if (b.phone !== undefined) { const p = D.normalizePhone(b.phone); p ? (u.phone = p) : errors.push('Phone number must contain 10 to 15 digits'); }
     if (b.interests !== undefined) u.interests = D.parseInterests(b.interests);
-    if (['role', 'verified', 'active', 'organizationNumber'].some(k => b[k] !== undefined)) throw new HttpError(400, 'Role, status and Organizer number cannot be changed from your profile');
+    if (b.organizationNumber !== undefined && u.role === 'organizer') {
+      const o = D.str(b.organizationNumber, 50);
+      if (o.length < 3) errors.push('Organization registration number is required');
+      else if (o !== u.organizationNumber) { u.organizationNumber = o; u.verified = false; }
+    }
     if (b.newPassword !== undefined) {
-      if (typeof b.newPassword !== 'string' || (b.newPassword.length < 8 || b.newPassword.length > 200)) errors.push('New password must contain 8 to 200 characters');
+      if (typeof b.newPassword !== 'string' || b.newPassword.length < 8) errors.push('New password must contain at least 8 characters');
       else if (!(await A.verifyPassword(String(b.currentPassword || ''), u.passwordHash))) errors.push('Current password is incorrect');
-      else { u.passwordHash = await A.hashPassword(b.newPassword); u.authVersion = (u.authVersion || 0) + 1; }
+      else u.passwordHash = await A.hashPassword(b.newPassword);
     }
     if (errors.length) throw new HttpError(400, errors.join('; '), errors);
-    await u.save(); if (b.newPassword) { await Session.deleteMany({ user: u._id }); await A.startSession(res, u._id); } // role / email / verified / active are never taken from this body
+    await u.save(); // role / email / verified / active are never taken from this body
     res.json({ user: u });
   }));
   api.delete('/profile', A.requireAuth, wrap(async (req, res) => {
     if (req.user.role === 'admin') throw new HttpError(409, 'Admin accounts cannot be deactivated');
-    req.user.active = false; req.user.authVersion = (req.user.authVersion || 0) + 1; await req.user.save(); await U.markAttention(req.user);
+    if (req.user.role === 'organizer' && await organizerHasOngoingEvent(req.user._id)) {
+      throw new HttpError(409, 'Your organizer account cannot be deactivated while one of your events is ongoing');
+    }
+    if (req.user.role === 'student' && await studentHasOngoingRegistration(req.user._id)) {
+      throw new HttpError(409, 'Your account cannot be deactivated while you are registered for an ongoing event');
+    }
+    req.user.active = false; await req.user.save();
     await Session.deleteMany({ user: req.user._id });
     res.setHeader('Set-Cookie', `${A.COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
     res.json({ ok: true });
   }));
 
-  U.install(api, wrap, { shape: (...a) => shape(...a), populateEv: (...a) => populateEv(...a), ratingsFor: (...a) => ratingsFor(...a) });
-
   // ---------------- Users (admin) ----------------
   api.get('/users', A.requireRole('admin'), wrap(async (req, res) => {
     const q = {}; if (req.query.role) q.role = String(req.query.role);
-    if (req.query.q) q.$or = ['name','email','organizationNumber'].map(k => ({ [k]: new RegExp(esc(String(req.query.q).slice(0,100)), 'i') }));
-    const p = U.page(req.query); res.json({ users: await User.find(q).sort({ createdAt: -1 }).skip(p.skip).limit(p.limit), total: await User.countDocuments(q) });
+    res.json({ users: await User.find(q).sort({ createdAt: -1 }).limit(500) });
   }));
+  api.patch('/users/:id', A.requireRole('admin'), wrap(async (req, res) => {
+    const u = await User.findById(req.params.id); if (!u) throw new HttpError(404, 'User not found');
+    const b = req.body || {};
+    if (b.active !== undefined) {
+      if (typeof b.active !== 'boolean') throw new HttpError(400, 'active must be true or false');
+      if (!b.active && u.role === 'admin') throw new HttpError(409, 'Admin accounts cannot be deactivated');
+      if (!b.active && u.role === 'organizer' && await organizerHasOngoingEvent(u._id)) {
+        throw new HttpError(409, 'This organizer cannot be deactivated while one of their events is ongoing');
+      }
+      if (!b.active && u.role === 'student' && await studentHasOngoingRegistration(u._id)) {
+        throw new HttpError(409, 'This student cannot be deactivated while registered for an ongoing event');
+      }
+      u.active = b.active; if (!b.active) await Session.deleteMany({ user: u._id });
+    }
+    if (b.verified !== undefined) {
+      if (typeof b.verified !== 'boolean') throw new HttpError(400, 'verified must be true or false');
+      if (u.role !== 'organizer') throw new HttpError(400, 'Only organizers can be verified');
+      if (!b.verified && await organizerHasOngoingEvent(u._id)) {
+        throw new HttpError(409, 'Organizer verification cannot be revoked while one of their events is ongoing');
+      }
+      const changed = u.verified !== b.verified; u.verified = b.verified;
+      if (changed) await notify(u._id, b.verified ? 'Your organizer account has been verified. You can now create events.' : 'Your organizer verification was revoked by an admin.');
+    }
+    await u.save(); res.json({ user: u });
+  }));
+
   // ---------------- Venues ----------------
   api.get('/venues', A.requireAuth, wrap(async (req, res) => {
     const q = req.user.role === 'admin' && req.query.all === '1' ? {} : { active: true };
@@ -145,7 +173,7 @@ function createApp() {
     const v = await Venue.findById(req.params.id); if (!v) throw new HttpError(404, 'Venue not found');
     const f = venueFields(req.body || {}, true);
     if (f.capacity !== undefined && f.capacity < v.capacity) {
-      const clash = await Event.findOne({ venue: v._id, status: { $in: ['Pending', 'Approved'] }, end: { $gt: new Date() }, capacity: { $gt: f.capacity } });
+      const clash = await Event.findOne({ venue: v._id, status: { $in: ['Pending', 'Approved'] }, start: { $gt: new Date() }, capacity: { $gt: f.capacity } });
       if (clash) throw new HttpError(409, `Capacity cannot be below the capacity (${clash.capacity}) of upcoming event "${clash.title}"`);
     }
     if (req.body.active === true) f.active = true;
@@ -166,13 +194,13 @@ function createApp() {
     const my = user.role === 'student' ? D.lastReg(ev, user._id) : null;
     const out = {
       _id: ev._id, title: ev.title, description: ev.description, category: ev.category, start: ev.start, end: ev.end,
-      venue: ev.venue, capacity: ev.capacity, status: ev.status, rejectionReason: ev.rejectionReason, cancellationReason: ev.cancellationReason, needsAttention: ev.needsAttention, canManage: canManage(user, ev),
-      organizer: canManage(user, ev) ? ev.organizer : { _id: ev.organizer?._id, name: ev.organizer?.name },
-      seatsTaken: D.seatsTaken(ev), waitlistCount: cnt('waitlisted'),
+      venue: ev.venue, capacity: ev.capacity, status: ev.status, displayStatus: ev.status === 'Approved' && isOngoing(ev) ? 'Ongoing' : ev.status, rejectionReason: ev.rejectionReason,
+      organizer: user.role === 'student' ? { _id: ev.organizer._id, name: ev.organizer.name } : ev.organizer,
+      seatsTaken: D.seatsTaken(ev), waitlistCount: cnt('waitlisted'), registrationHistoryCount: regs.length, isOngoing: isOngoing(ev),
       rating: ratings[String(ev._id)] || { avg: null, count: 0 }, updatedAt: ev.updatedAt,
       myRegistration: my ? { status: my.status, ticketCode: my.ticketCode, registeredAt: my.registeredAt, checkedInAt: my.checkedInAt } : null,
     };
-    if (canManage(user, ev)) {
+    if (user.role !== 'student') {
       Object.assign(out, { budget: ev.budget, budgetNotes: ev.budgetNotes, counts: { registered: cnt('registered'), waitlisted: cnt('waitlisted'), checkedIn: cnt('checked-in'), cancelled: cnt('cancelled'), noShow: cnt('no-show') } });
     }
     return out;
@@ -196,13 +224,12 @@ function createApp() {
     if (q) and.push({ $or: [{ title: new RegExp(esc(String(q).slice(0, 100)), 'i') }, { description: new RegExp(esc(String(q).slice(0, 100)), 'i') }] });
     if (category && D.CATEGORIES.includes(category)) and.push({ category });
     if (venue && mongoose.isValidObjectId(venue)) and.push({ venue: oid(venue) });
-    if (from && !isNaN(new Date(from))) and.push({ start: { $gte: new Date(String(from).length === 10 ? from + 'T00:00:00+05:30' : from) } });
+    if (from && !isNaN(new Date(from))) and.push({ start: { $gte: new Date(from) } });
     if (to && !isNaN(new Date(to))) and.push({ start: { $lte: new Date(new Date(to).getTime() + 86400000) } });
     if (status && D.EVENT_STATUS.includes(status) && u.role !== 'student') and.push({ status });
-    const query = and.length ? { $and: and } : {}; const p = U.page(req.query);
-    const evs = await populateEv(Event.find(query).sort({ start: req.query.sort === 'desc' ? -1 : 1 }).skip(p.skip).limit(p.limit));
+    const evs = await populateEv(Event.find(and.length ? { $and: and } : {}).sort({ start: 1 }).limit(300));
     const ratings = await ratingsFor(evs.map((e) => e._id));
-    res.json({ events: evs.map((e) => shape(e, u, ratings)), total: await Event.countDocuments(query) });
+    res.json({ events: evs.map((e) => shape(e, u, ratings)) });
   }));
 
   async function overlapCheck(venueId, start, end, excludeId) {
@@ -225,7 +252,7 @@ function createApp() {
     const f = D.validateEvent(req.body, venue);
     await overlapCheck(venue._id, f.start, f.end);
     try {
-      const ev = await Event.create({ ...f, venue: venue._id, organizer: req.user._id, originalCreator: req.user._id, status: 'Pending' });
+      const ev = await Event.create({ ...f, venue: venue._id, organizer: req.user._id, status: 'Pending' });
       const admins = await User.find({ role: 'admin', active: true }, '_id');
       await notify(admins.map((a) => a._id), `New event "${ev.title}" is awaiting approval.`);
       res.status(201).json({ event: ev });
@@ -236,6 +263,7 @@ function createApp() {
     for (let attempt = 0; attempt < 6; attempt++) {
       const ev = await Event.findById(req.params.id); if (!ev) throw new HttpError(404, 'Event not found');
       if (!canManage(req.user, ev)) throw new HttpError(403, 'You can only edit your own events');
+      if (hasStarted(ev)) throw new HttpError(409, 'An event cannot be edited or have its dates changed once it has started');
       if (['Completed', 'Cancelled', 'Archived'].includes(ev.status)) throw new HttpError(409, `${ev.status} events cannot be edited`);
       const venue = await getVenue(req.body.venue || ev.venue);
       const merged = { title: ev.title, description: ev.description, category: ev.category, start: ev.start, end: ev.end, capacity: ev.capacity, budget: ev.budget, budgetNotes: ev.budgetNotes, ...req.body };
@@ -273,23 +301,19 @@ function createApp() {
         if (ev.end <= now) throw new HttpError(409, 'Event has already ended');
         await overlapCheck(ev.venue, ev.start, ev.end, ev._id);
       }
-      if (target === 'Rejected' && !D.str(req.body.reason,500)) throw new HttpError(400, 'Rejection reason is required');
-      if (target === 'Approved' && !ev.firstApprovedAt && ev.start > now) { ev.firstApprovedAt = now; ev.announcementPending = true; }
       ev.status = target; ev.rejectionReason = target === 'Rejected' ? D.str(req.body.reason, 500) : '';
       await ev.save();
-      await U.audit(req.user, 'event-' + target.toLowerCase(), ev.id, D.str(req.body.reason,500));
-      if (target === 'Approved') { try { await U.flushAnnouncements(); } catch { console.error('Announcement queued for retry'); } }
       await notify(ev.organizer, target === 'Approved' ? `Your event "${ev.title}" was approved.` : `Your event "${ev.title}" was rejected.${ev.rejectionReason ? ' Reason: ' + ev.rejectionReason : ''}`);
       return res.json({ event: ev });
     }
     if (!canManage(u, ev)) throw new HttpError(403, 'You can only change the status of your own events');
     if (target === 'Cancelled') {
+      if (hasStarted(ev, now)) throw new HttpError(409, 'An event cannot be cancelled after it has started; complete or archive it instead');
       if (!['Pending', 'Approved', 'Rejected'].includes(cur)) throw new HttpError(409, `A ${cur} event cannot be cancelled`);
-      ev.cancellationReason = D.str(req.body.reason,500); if (!ev.cancellationReason) throw new HttpError(400, 'Cancellation reason is required');
       const audience = ev.registrations.filter((r) => ['registered', 'waitlisted', 'checked-in'].includes(r.status)).map((r) => r.student);
       ev.registrations.forEach((r) => { if (['registered', 'waitlisted'].includes(r.status)) r.status = 'cancelled'; }); // history kept, seats released
       ev.status = 'Cancelled'; await ev.save();
-      await notify(audience, `Event "${ev.title}" has been cancelled. Reason: ${ev.cancellationReason}`);
+      await notify(audience, `Event "${ev.title}" has been cancelled.`);
     } else if (target === 'Completed') {
       if (cur !== 'Approved') throw new HttpError(409, 'Only approved events can be completed');
       if (ev.end > now) throw new HttpError(409, 'The event has not ended yet');
@@ -299,15 +323,28 @@ function createApp() {
       if (!['Cancelled', 'Completed'].includes(cur)) throw new HttpError(409, 'Only cancelled or completed events can be archived');
       ev.status = 'Archived'; await ev.save(); // document is preserved for reports
     } else throw new HttpError(409, `Cannot change status from ${cur} to ${target}`);
-    await U.audit(req.user, 'event-' + target.toLowerCase(), ev.id, D.str(req.body.reason,500));
     res.json({ event: ev });
+  }));
+
+  api.delete('/events/:id', A.requireRole('organizer', 'admin'), wrap(async (req, res) => {
+    const ev = await Event.findById(req.params.id); if (!ev) throw new HttpError(404, 'Event not found');
+    if (!canManage(req.user, ev)) throw new HttpError(403, 'You can only delete your own events');
+    const now = new Date();
+    if (hasStarted(ev, now)) throw new HttpError(409, 'An event cannot be deleted after it has started');
+    if (['Completed', 'Archived'].includes(ev.status)) throw new HttpError(409, `${ev.status} events are retained for reporting and cannot be deleted`);
+    if ((ev.registrations || []).length > 0) throw new HttpError(409, 'This event has registration history. Cancel or archive it instead of deleting it');
+    if (await Feedback.exists({ event: ev._id })) throw new HttpError(409, 'This event has feedback history and cannot be deleted');
+    const result = await Event.deleteOne({ _id: ev._id, __v: ev.__v });
+    if (result.deletedCount !== 1) throw new HttpError(409, 'The event changed while deleting. Refresh and try again');
+    res.json({ ok: true });
   }));
 
   api.post('/events/:id/register', A.requireRole('student'), wrap(async (req, res) => {
     for (let attempt = 0; attempt < 8; attempt++) {
       const ev = await Event.findById(req.params.id); if (!ev) throw new HttpError(404, 'Event not found');
+      if (ev.status === 'Completed' || ev.end <= new Date()) throw new HttpError(409, 'Registration is closed because this event has completed');
       if (ev.status !== 'Approved') throw new HttpError(409, 'Event is not open for registration');
-      if (ev.start <= new Date()) throw new HttpError(409, 'Event has already started');
+      if (ev.start <= new Date()) throw new HttpError(409, 'Registration is closed because this event has already started');
       if (D.activeReg(ev, req.user._id)) throw new HttpError(409, 'You are already registered for this event');
       const status = D.seatsTaken(ev) < ev.capacity ? 'registered' : 'waitlisted';
       const reg = { student: req.user._id, status, ticketCode: ticketCode(), registeredAt: new Date() };
@@ -327,7 +364,7 @@ function createApp() {
       if (idx < 0) throw new HttpError(404, 'You have no active registration for this event');
       const mine = ev.registrations[idx];
       if (mine.status === 'checked-in' || mine.status === 'no-show') throw new HttpError(409, `A ${mine.status} registration cannot be cancelled`);
-      if (ev.start <= new Date()) throw new HttpError(409, 'Event has already started');
+      if (isOngoing(ev) || ev.start <= new Date()) throw new HttpError(409, 'A registration cannot be removed once the event has started');
       const set = { [`registrations.${idx}.status`]: 'cancelled' }; let promoted = null;
       if (mine.status === 'registered') {
         const j = ev.registrations.findIndex((r) => r.status === 'waitlisted'); // array order == registration order
@@ -355,7 +392,7 @@ function createApp() {
     const ev = await Event.findById(req.params.id).populate('registrations.student', 'name email phone'); if (!ev) throw new HttpError(404, 'Event not found');
     if (!canManage(req.user, ev)) throw new HttpError(403, 'You can only view attendees of your own events');
     res.json({ event: { _id: ev._id, title: ev.title, status: ev.status, start: ev.start, end: ev.end, capacity: ev.capacity },
-      total: ev.registrations.length, attendees: ev.registrations.slice(U.page(req.query).skip, U.page(req.query).skip + U.page(req.query).limit).map((r) => ({ student: r.student, status: r.status, ticketCode: r.ticketCode, registeredAt: r.registeredAt, checkedInAt: r.checkedInAt })) });
+      attendees: ev.registrations.map((r) => ({ student: r.student, status: r.status, ticketCode: r.ticketCode, registeredAt: r.registeredAt, checkedInAt: r.checkedInAt })) });
   }));
 
   api.post('/events/:id/checkin', A.requireRole('organizer', 'admin'), wrap(async (req, res) => {
@@ -366,12 +403,12 @@ function createApp() {
     if (ev.status !== 'Approved') throw new HttpError(409, 'Check-in is only available for approved events');
     const now = new Date();
     if (now < new Date(ev.start.getTime() - D.HOUR)) throw new HttpError(409, `Check-in opens one hour before the event (${fmt(new Date(ev.start.getTime() - D.HOUR))})`);
-    if (now >= ev.end) throw new HttpError(409, 'Check-in closed when the event ended');
+    if (now > ev.end) throw new HttpError(409, 'Check-in closed when the event ended');
     const reg = ev.registrations.find((r) => r.ticketCode === code);
     if (!reg) throw new HttpError(404, 'Invalid ticket code for this event');
     if (reg.status === 'checked-in') throw new HttpError(409, 'This ticket has already been checked in');
     if (reg.status !== 'registered') throw new HttpError(409, `Ticket is ${reg.status} and cannot be checked in`);
-    const r = await Event.updateOne({ _id: ev._id, status: 'Approved', __v: ev.__v, registrations: { $elemMatch: { ticketCode: code, status: 'registered' } } }, { $set: { 'registrations.$.status': 'checked-in', 'registrations.$.checkedInAt': now, 'registrations.$.checkedInBy': req.user._id }, $inc: { __v: 1 } });
+    const r = await Event.updateOne({ _id: ev._id, registrations: { $elemMatch: { ticketCode: code, status: 'registered' } } }, { $set: { 'registrations.$.status': 'checked-in', 'registrations.$.checkedInAt': now } });
     if (r.modifiedCount !== 1) throw new HttpError(409, 'This ticket has already been checked in');
     const student = await User.findById(reg.student, 'name email');
     await notify(reg.student, `You are checked in to "${ev.title}". Enjoy the event!`);
@@ -407,18 +444,16 @@ function createApp() {
 
   // ---------------- Notifications ----------------
   api.get('/notifications', A.requireAuth, wrap(async (req, res) => {
-    try { await U.flushAnnouncements(); } catch { console.error('Announcement retry deferred'); }
-    const p = U.page(req.query); const q = { user: req.user._id, deleted: { $ne: true } };
-    const notifications = await Notification.find(q).sort({ createdAt: -1 }).skip(p.skip).limit(p.limit);
-    res.json({ notifications, total: await Notification.countDocuments(q), unread: await Notification.countDocuments({ ...q, read: false }) });
+    const notifications = await Notification.find({ user: req.user._id }).sort({ createdAt: -1 }).limit(200);
+    res.json({ notifications, unread: notifications.filter((n) => !n.read).length });
   }));
   api.patch('/notifications/:id', A.requireAuth, wrap(async (req, res) => {
     const n = await Notification.findOneAndUpdate({ _id: req.params.id, user: req.user._id }, { read: (req.body || {}).read !== false }, { new: true });
     if (!n) throw new HttpError(404, 'Notification not found'); res.json({ notification: n });
   }));
   api.delete('/notifications/:id', A.requireAuth, wrap(async (req, res) => {
-    const r = await Notification.updateOne({ _id: req.params.id, user: req.user._id }, { $set: { deleted: true, read: true } });
-    if (!r.matchedCount) throw new HttpError(404, 'Notification not found'); res.json({ ok: true });
+    const r = await Notification.deleteOne({ _id: req.params.id, user: req.user._id });
+    if (!r.deletedCount) throw new HttpError(404, 'Notification not found'); res.json({ ok: true });
   }));
 
   // ---------------- Suggestions ----------------

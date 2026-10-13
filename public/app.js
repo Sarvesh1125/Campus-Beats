@@ -1,5 +1,5 @@
 'use strict';
-/* Campus Connect front end. Every action calls the Express API; nothing is stored in the browser. */
+/* Campus Beats front end. Every action calls the Express API; nothing is stored in the browser. */
 const $ = (s) => document.querySelector(s);
 const h = (tag, attrs, ...kids) => {
   const e = document.createElement(tag); let value;
@@ -14,12 +14,12 @@ const h = (tag, attrs, ...kids) => {
   if (value !== undefined) e.value = value;
   return e;
 };
-const fmt = (d) => (d ? new Date(d).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' }) : '—');
+const fmt = (d) => (d ? new Date(d).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '—');
 const slug = (s) => String(s).toLowerCase().replace(/\s+/g, '-');
 const badge = (s) => h('span', { class: 'badge ' + slug(s) }, s);
 const state = { user: null, view: null };
 const CATS = ['Academic', 'Cultural', 'Sports', 'Social', 'Workshop', 'Seminar'];
-const toLocal = d => new Date(new Date(d).getTime() + 19800000).toISOString().slice(0,16);
+const toLocal = (d) => { const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 16); };
 
 async function api(path, { method = 'GET', body } = {}) {
   const r = await fetch('/api' + path, { method, credentials: 'same-origin', headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
@@ -35,13 +35,13 @@ function toast(msg, type = 'info') {
   $('#toasts').append(t); setTimeout(() => t.remove(), 4500);
 }
 const guard = (fn) => async (e) => {
-  const b = e && e.currentTarget; if (b?.dataset.busy) { e.preventDefault(); return; } if (b) { b.dataset.busy = '1'; b.disabled = true; b.querySelectorAll('button[type=submit]').forEach(x => x.disabled = true); }
-  try { await fn(e); } catch (err) { toast(err.message, 'error'); } finally { if (b) { delete b.dataset.busy; b.disabled = false; b.querySelectorAll('button[type=submit]').forEach(x => x.disabled = false); } }
+  const b = e && e.currentTarget; if (b) b.disabled = true;
+  try { await fn(e); } catch (err) { toast(err.message, 'error'); } finally { if (b && b.isConnected) b.disabled = false; }
 };
-function modal(title, body, { wide, onClose } = {}) {
+function modal(title, body, { wide } = {}) {
   const prev = document.activeElement;
-  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); if (prev && prev.focus) prev.focus(); onClose?.(); };
-  const onKey = (e) => { if ($('#modalRoot').lastChild !== overlay) return; if (e.key === 'Escape') close(); if (e.key === 'Tab') { const a = [...overlay.querySelectorAll('button,input,select,textarea,a[href]')].filter(x => !x.disabled && x.offsetParent !== null); if (a.length && e.shiftKey && document.activeElement === a[0]) { e.preventDefault(); a.at(-1).focus(); } else if (a.length && !e.shiftKey && document.activeElement === a.at(-1)) { e.preventDefault(); a[0].focus(); } } };
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); if (prev && prev.focus) prev.focus(); };
+  const onKey = (e) => { if (e.key === 'Escape' && $('#modalRoot').lastChild === overlay) close(); };
   const overlay = h('div', { class: 'overlay', onclick: (e) => { if (e.target === overlay) close(); } },
     h('div', { class: 'modal' + (wide ? ' wide' : ''), role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
       h('header', {}, h('h2', {}, title), h('button', { class: 'icon-btn', 'aria-label': 'Close dialog', onclick: close }, '✕')), body));
@@ -53,7 +53,7 @@ function confirmDialog(message, label = 'Confirm') {
   return new Promise((resolve) => {
     let done = false; const fin = (v) => { if (!done) { done = true; close(); resolve(v); } };
     const close = modal('Please confirm', h('div', {}, h('p', {}, message),
-      h('div', { class: 'form-actions' }, h('button', { class: 'btn ghost', onclick: () => fin(false) }, 'Cancel'), h('button', { class: 'btn danger', onclick: () => fin(true) }, label))), { onClose: () => { if (!done) { done = true; resolve(false); } } });
+      h('div', { class: 'form-actions' }, h('button', { class: 'btn ghost', onclick: () => fin(false) }, 'Cancel'), h('button', { class: 'btn danger', onclick: () => fin(true) }, label))));
   });
 }
 const loading = () => h('div', { class: 'spinner', role: 'status', 'aria-label': 'Loading' });
@@ -65,19 +65,20 @@ const select = (opts, value, attrs) => h('select', { ...attrs, value }, opts.map
 
 // ---------------- Auth ----------------
 function authPanel() {
-  return h('div', { class: 'auth-panel' }, h('div', { class: 'brand' }, h('span', { class: 'logo', 'aria-hidden': 'true' }), 'Campus Connect'),
+  return h('div', { class: 'auth-panel' }, h('div', { class: 'brand' }, h('span', { class: 'logo', 'aria-hidden': 'true' }), 'Campus Beats'),
     h('h2', {}, 'Every campus event, one ticket away.'),
     h('div', { class: 'mini-ticket', 'aria-hidden': 'true' }, h('div', { class: 'stub' }, h('span', { class: 'mon' }, 'Oct'), h('span', { class: 'day' }, '24'), h('span', { class: 'wd' }, 'Sat')),
       h('div', { class: 'body' }, h('b', {}, 'Rhythm of Campus'), h('span', { class: 'meta' }, 'Main Auditorium, 5:00 pm'), h('span', { class: 'meta' }, 'Ticket TKT-8F2A91C0D3'))));
 }
 function showAuth() {
-  if (typeof stopScanner === 'function') stopScanner();
   $('#shell').hidden = true; const a = $('#auth'); a.hidden = false;
   let mode = 'login';
   const draw = () => {
     const err = h('div', { class: 'err', role: 'alert', hidden: true });
     const f = (name, label, type = 'text', extra = {}) => field(label, h('input', { name, type, required: true, ...extra }));
     const role = select([['student', 'Student'], ['organizer', 'Organizer']], 'student', { name: 'role' });
+    const orgField = field('Organization registration number', h('input', { name: 'organizationNumber' }));
+    orgField.hidden = true; role.addEventListener('change', () => { orgField.hidden = role.value !== 'organizer'; });
     const form = h('form', { novalidate: true, onsubmit: guard(async (e) => {
       e.preventDefault(); err.hidden = true;
       const fd = Object.fromEntries(new FormData(form));
@@ -92,13 +93,13 @@ function showAuth() {
       mode === 'register' && f('phone', 'Phone number', 'tel', { placeholder: '10–15 digits' }),
       f('password', 'Password', 'password', { autocomplete: mode === 'login' ? 'current-password' : 'new-password', minlength: 8 }),
       mode === 'register' && field('Role', role),
-      mode === 'register' && h('p', { class: 'hint' }, 'Organizer numbers are generated automatically. Admin verification is required.'),
+      mode === 'register' && orgField,
       mode === 'register' && field('Interests', h('input', { name: 'interests', placeholder: 'AI, music, sports' }), 'Comma separated'),
       h('button', { class: 'btn', type: 'submit', style: 'width:100%' }, mode === 'login' ? 'Log in' : 'Create account'));
     a.replaceChildren(h('div', { class: 'auth-wrap' }, authPanel(), h('div', { class: 'auth-card' }, h('h2', {}, mode === 'login' ? 'Welcome back' : 'Create your account'), h('p', { class: 'meta' }, mode === 'login' ? 'Log in to see your events and tickets.' : 'Students can register for events. Organizers need admin verification.'),
       h('div', { class: 'tabs', role: 'tablist' },
         ['login', 'register'].map((m) => h('button', { class: 'btn ' + (mode === m ? '' : 'ghost'), role: 'tab', 'aria-selected': mode === m, onclick: () => { mode = m; draw(); } }, m === 'login' ? 'Log in' : 'Register'))),
-      form, mode === 'login' && h('button', { class: 'btn ghost', onclick: () => showPasswordPage() }, 'Forgot password?'))));
+      form)));
   };
   draw();
 }
@@ -117,7 +118,6 @@ function start() {
 }
 async function go(name) {
   if (name === 'create') { await go('manage'); return openEventForm(); }
-  if (typeof stopScanner === 'function') stopScanner();
   state.view = name; $('#sidebar').classList.remove('open'); $('#menuBtn').setAttribute('aria-expanded', 'false');
   document.querySelectorAll('#nav button').forEach((b) => { b.dataset.view === name ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current'); });
   const label = NAV[state.user.role].find((n) => n[0] === name)[1]; $('#viewTitle').textContent = label;
@@ -140,7 +140,7 @@ function eventCard(ev) {
   return h('article', { class: 'evt' },
     h('div', { class: 'stub', 'aria-hidden': 'true' }, h('span', { class: 'mon' }, d.toLocaleString('en-IN', { month: 'short' })), h('span', { class: 'day' }, d.getDate()), h('span', { class: 'wd' }, d.toLocaleString('en-IN', { weekday: 'short' }))),
     h('div', { class: 'body' },
-      h('div', { class: 'row' }, h('span', { class: 'cat' }, ev.category), ev.status !== 'Approved' && badge(ev.status), my && badge(my.status)),
+      h('div', { class: 'row' }, h('span', { class: 'cat' }, ev.category), (ev.displayStatus || ev.status) !== 'Approved' && badge(ev.displayStatus || ev.status), my && badge(my.status)),
       h('h3', {}, ev.title),
       h('p', { class: 'meta' }, `${d.toLocaleTimeString('en-IN', { timeStyle: 'short' })} at ${ev.venue ? ev.venue.name : 'venue to be announced'}`),
       h('div', { class: 'seats' }, h('div', { class: 'bar', role: 'img', 'aria-label': `${ev.seatsTaken} of ${ev.capacity} seats taken` }, h('i', { style: `width:${pct}%` })),
@@ -156,14 +156,12 @@ async function showTicket(eventId) {
 function openEvent(ev) {
   const u = state.user; const body = h('div'); let close;
   const done = (m) => { close(); toast(m, 'success'); reload(); };
-  body.append(h('div', { class: 'row' }, badge(ev.category), badge(ev.status)),
+  body.append(h('div', { class: 'row' }, badge(ev.category), badge(ev.displayStatus || ev.status)),
     h('p', {}, ev.description),
     h('p', { class: 'meta' }, `📅 ${fmt(ev.start)} → ${fmt(ev.end)}`), h('p', { class: 'meta' }, `📍 ${ev.venue?.name || '—'}, ${ev.venue?.location || ''}`),
     h('p', { class: 'meta' }, `Organizer: ${ev.organizer?.name || '—'} · Seats ${ev.seatsTaken}/${ev.capacity} · Waitlist ${ev.waitlistCount}`),
     ev.rejectionReason && h('div', { class: 'err' }, 'Rejected: ' + ev.rejectionReason),
-    ev.cancellationReason && h('div', { class: 'err' }, 'Cancelled: ' + ev.cancellationReason),
-    ev.needsAttention && u.role === 'admin' && h('div', { class: 'err' }, 'This event needs an active, verified Organizer. Admin can continue managing it.'),
-    ev.canManage && h('p', { class: 'meta' }, `Budget ₹${(ev.budget || 0).toLocaleString('en-IN')}${ev.budgetNotes ? ' – ' + ev.budgetNotes : ''}`));
+    u.role !== 'student' && h('p', { class: 'meta' }, `Budget ₹${(ev.budget || 0).toLocaleString('en-IN')}${ev.budgetNotes ? ' – ' + ev.budgetNotes : ''}`));
   const actions = h('div', { class: 'form-actions' }); body.append(actions);
   if (u.role === 'student') {
     const my = ev.myRegistration; const upcoming = new Date(ev.start) > new Date();
@@ -177,8 +175,7 @@ function openEvent(ev) {
       actions.append(h('button', { class: 'btn', onclick: guard(async () => { const r = await api(`/events/${ev._id}/register`, { method: 'POST' }); done(r.registration.status === 'registered' ? 'Registered! Your QR ticket is ready.' : 'Event is full – you joined the waitlist.'); }) }, full ? 'Join waitlist' : 'Register'));
     }
     if (my && my.status === 'checked-in' && new Date(ev.end) < new Date()) body.append(feedbackForm(ev));
-  } else if (ev.canManage !== false) {
-    actions.append(h('button', { class: 'btn ghost', onclick: () => { close(); go(u.role === 'admin' ? (ev.status === 'Pending' ? 'approvals' : 'events') : 'manage'); } }, 'Manage event'));
+  } else {
     actions.append(h('button', { class: 'btn ghost', onclick: () => { close(); openAttendees(ev._id); } }, 'Attendees & check-in'));
     body.append(h('h2', { class: 'section' }, 'Feedback'), feedbackList(ev));
   }
@@ -230,20 +227,19 @@ async function openEventForm(ev) {
     budgetNotes: h('textarea', { value: ev?.budgetNotes || '' }),
     description: h('textarea', { value: ev?.description || '', style: 'min-height:120px' }),
   };
-  const close = modal(ev?._id ? 'Edit event' : 'Create event', h('form', { novalidate: true, onsubmit: guard(async (e) => {
+  const close = modal(ev ? 'Edit event' : 'Create event', h('form', { novalidate: true, onsubmit: guard(async (e) => {
     e.preventDefault(); err.hidden = true;
     const body = { title: f.title.value, category: f.category.value, venue: f.venue.value, capacity: Number(f.capacity.value), budget: f.budget.value === '' ? 0 : Number(f.budget.value), budgetNotes: f.budgetNotes.value, description: f.description.value,
-      start: f.start.value ? new Date(f.start.value + '+05:30').toISOString() : '', end: f.end.value ? new Date(f.end.value + '+05:30').toISOString() : '' };
-    try { await api(ev?._id ? `/events/${ev._id}` : '/events', { method: ev?._id ? 'PATCH' : 'POST', body }); close(); toast(ev?._id ? 'Event updated and sent back for approval' : 'Event submitted for admin approval', 'success'); reload(); }
+      start: f.start.value ? new Date(f.start.value).toISOString() : '', end: f.end.value ? new Date(f.end.value).toISOString() : '' };
+    try { await api(ev ? `/events/${ev._id}` : '/events', { method: ev ? 'PATCH' : 'POST', body }); close(); toast(ev ? 'Event updated and sent back for approval' : 'Event submitted for admin approval', 'success'); reload(); }
     catch (ex) { err.textContent = ex.message; err.hidden = false; }
   }) }, err, field('Title', f.title), h('div', { class: 'toolbar' }, field('Category', f.category), field('Venue', f.venue)),
-    h('div', { class: 'toolbar' }, field('Start (IST)', f.start), field('End (IST)', f.end)),
+    h('div', { class: 'toolbar' }, field('Start', f.start), field('End', f.end)),
     h('div', { class: 'toolbar' }, field('Capacity', f.capacity), field('Budget (₹)', f.budget)),
-    h('button', { class: 'btn ghost', type: 'button', onclick: guard(() => checkAvailability(f.venue.value, f.start.value, f.end.value, ev?._id)) }, 'Check venue availability'),
     field('Budget breakdown', f.budgetNotes, 'Required when budget is above ₹10,000'),
     field('Description', f.description, 'Minimum 50 characters'),
-    ev?._id && h('p', { class: 'hint' }, 'Saving changes sends the event back to Pending for admin approval.'),
-    h('div', { class: 'form-actions' }, h('button', { type: 'button', class: 'btn ghost', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn', type: 'submit' }, ev?._id ? 'Save changes' : 'Submit event'))), { wide: true });
+    ev && h('p', { class: 'hint' }, 'Saving changes sends the event back to Pending for admin approval.'),
+    h('div', { class: 'form-actions' }, h('button', { type: 'button', class: 'btn ghost', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn', type: 'submit' }, ev ? 'Save changes' : 'Submit event'))), { wide: true });
 }
 
 // ---------------- Views ----------------
@@ -251,16 +247,22 @@ function eventTable(events, { admin } = {}) {
   if (!events.length) return empty('No events found.');
   return table(['Event', 'When', 'Venue', 'Status', 'Seats', 'Actions'], events.map((ev) => {
     const live = ['Pending', 'Approved', 'Rejected'].includes(ev.status);
-    const st = (status, label, confirm, cls = 'ghost') => h('button', { class: `btn small ${cls}`, onclick: guard(async () => { if (!confirm || await confirmDialog(confirm, label)) { await api(`/events/${ev._id}/status`, { method: 'PATCH', body: { status, ...(status === 'Cancelled' ? { reason: prompt('Reason for cancellation (required):') || '' } : {}) } }); toast(`Event ${status.toLowerCase()}`, 'success'); reload(); } }) }, label);
-    return [h('div', {}, h('strong', {}, ev.title), ev.needsAttention && badge('Needs attention')), fmt(ev.start), ev.venue?.name, badge(ev.status),
+    const terminal = ['Cancelled', 'Rejected', 'Completed', 'Archived'].includes(ev.status);
+    const started = !terminal && new Date(ev.start) <= new Date();
+    const ongoing = Boolean(ev.isOngoing) || (started && new Date(ev.end) > new Date());
+    const locked = started;
+    const deletable = Number(ev.registrationHistoryCount || 0) === 0 && !locked && !['Completed', 'Archived'].includes(ev.status);
+    const st = (status, label, confirm, cls = 'ghost') => h('button', { class: `btn small ${cls}`, onclick: guard(async () => { if (!confirm || await confirmDialog(confirm, label)) { await api(`/events/${ev._id}/status`, { method: 'PATCH', body: { status } }); toast(`Event ${status.toLowerCase()}`, 'success'); reload(); } }) }, label);
+    const remove = h('button', { class: 'btn small danger', disabled: !deletable, title: deletable ? 'Delete this empty event' : (locked ? 'Started events cannot be deleted' : 'Only events with no registration history can be deleted'), onclick: guard(async () => { if (deletable && await confirmDialog(`Permanently delete "${ev.title}"? This is only allowed because nobody has ever registered.`, 'Delete event')) { await api(`/events/${ev._id}`, { method: 'DELETE' }); toast('Empty event deleted', 'success'); reload(); } }) }, 'Delete');
+    return [h('strong', {}, ev.title), fmt(ev.start), ev.venue?.name, badge(ev.displayStatus || ev.status),
       `${ev.counts ? ev.counts.registered + ev.counts.checkedIn + ev.counts.noShow : ev.seatsTaken}/${ev.capacity}` + (ev.counts?.waitlisted ? ` (+${ev.counts.waitlisted} wl)` : ''),
       h('div', { class: 'actions' }, h('button', { class: 'btn small ghost', onclick: () => openEvent(ev) }, 'Details'), h('button', { class: 'btn small ghost', onclick: () => openAttendees(ev._id) }, 'Attendees'),
-        state.user.role === 'admin' && h('button', { class: 'btn small ghost', onclick: guard(() => reassignEvent(ev)) }, 'Reassign'),
-        state.user.role === 'organizer' && h('button', { class: 'btn small ghost', onclick: () => openEventForm({ ...ev, _id: undefined, title: ev.title + ' (copy)', start: new Date(Date.now()+86400000), end: new Date(Date.now()+90000000) }) }, 'Clone'),
-        live && h('button', { class: 'btn small ghost', onclick: () => openEventForm(ev) }, 'Edit'),
-        live && st('Cancelled', 'Cancel event', 'Cancel this event? All registered students will be notified.', 'danger'),
+        live && !locked && h('button', { class: 'btn small ghost', onclick: () => openEventForm(ev) }, 'Edit'),
+        live && !locked && st('Cancelled', 'Cancel event', 'Cancel this event? All registered students will be notified.', 'danger'),
+        locked && h('span', { class: 'hint' }, ongoing ? 'Live event locked' : 'Started event locked'),
         ev.status === 'Approved' && new Date(ev.end) < new Date() && st('Completed', 'Complete'),
-        ['Cancelled', 'Completed'].includes(ev.status) && st('Archived', 'Archive', 'Archive this event? It stays in reports.'))];
+        ['Cancelled', 'Completed'].includes(ev.status) && st('Archived', 'Archive', 'Archive this event? It stays in reports.'),
+        remove)];
   }));
 }
 
@@ -354,13 +356,13 @@ const VIEWS = {
   },
   async profile() {
     const u = state.user; const err = h('div', { class: 'err', hidden: true, role: 'alert' });
-    const f = { name: h('input', { value: u.name }), phone: h('input', { value: u.phone }), interests: h('input', { value: (u.interests || []).join(', ') }), org: h('input', { value: u.organizationNumber || '', readonly: true }), cur: h('input', { type: 'password' }), np: h('input', { type: 'password', minlength: 8 }) };
+    const f = { name: h('input', { value: u.name }), phone: h('input', { value: u.phone }), interests: h('input', { value: (u.interests || []).join(', ') }), org: h('input', { value: u.organizationNumber || '' }), cur: h('input', { type: 'password' }), np: h('input', { type: 'password', minlength: 8 }) };
     return h('form', { class: 'card', style: 'max-width:600px', novalidate: true, onsubmit: guard(async (e) => {
       e.preventDefault(); err.hidden = true; const body = { name: f.name.value, phone: f.phone.value, interests: f.interests.value };
-      if (f.np.value) { body.newPassword = f.np.value; body.currentPassword = f.cur.value; }
+      if (u.role === 'organizer') body.organizationNumber = f.org.value; if (f.np.value) { body.newPassword = f.np.value; body.currentPassword = f.cur.value; }
       try { state.user = (await api('/profile', { method: 'PATCH', body })).user; $('#whoName').textContent = state.user.name; toast('Profile updated', 'success'); reload(); } catch (ex) { err.textContent = ex.message; err.hidden = false; }
     }) }, err, h('p', {}, h('strong', {}, u.email), ' · ', badge(u.role), u.role === 'organizer' && badge(u.verified ? 'Verified' : 'Pending verification')),
-      field('Full name', f.name), field('Phone', f.phone), field('Interests', f.interests, 'Comma separated'), u.role === 'organizer' && field('Organization registration number', f.org, 'Generated by the system; cannot be edited'),
+      field('Full name', f.name), field('Phone', f.phone), field('Interests', f.interests, 'Comma separated'), u.role === 'organizer' && field('Organization registration number', f.org, 'Changing this requires re-verification'),
       field('Current password', f.cur, 'Only needed to change your password'), field('New password', f.np),
       h('div', { class: 'form-actions' }, u.role !== 'admin' && h('button', { type: 'button', class: 'btn danger', onclick: guard(async () => { if (await confirmDialog('Deactivate your account? You will be logged out and cannot log in again.', 'Deactivate')) { await api('/profile', { method: 'DELETE' }); state.user = null; showAuth(); toast('Account deactivated'); } }) }, 'Deactivate account'), h('button', { class: 'btn', type: 'submit' }, 'Save changes')));
   },
@@ -405,4 +407,4 @@ async function reports() {
 $('#logoutBtn').addEventListener('click', guard(async () => { await api('/auth/logout', { method: 'POST' }); state.user = null; showAuth(); }));
 $('#bellBtn').addEventListener('click', () => go('notifications'));
 $('#menuBtn').addEventListener('click', () => { const o = $('#sidebar').classList.toggle('open'); $('#menuBtn').setAttribute('aria-expanded', String(o)); });
-(async () => { if (location.hash.startsWith('#reset=')) { setTimeout(() => showPasswordPage(location.hash.slice(7)), 0); return; } try { state.user = (await api('/auth/me')).user; start(); } catch { showAuth(); } })();
+(async () => { try { state.user = (await api('/auth/me')).user; start(); } catch { showAuth(); } })();
